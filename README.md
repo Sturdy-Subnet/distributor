@@ -1,0 +1,1 @@
+sn10 miner and distributed for LPs

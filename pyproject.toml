@@ -5,8 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
 dependencies = [
+    "aiosqlite>=0.21.0",
+    "argparse>=1.4.0",
+    "ruff>=0.12.4",
     "sturdy-subnet",
 ]
 
 [tool.uv.sources]
-sturdy-subnet = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet", rev = "feat/sturdy-lp-miner-whitelist" }
+sturdy-subnet = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet", rev = "4.0.4" }
