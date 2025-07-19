@@ -400,12 +400,20 @@ if __name__ == "__main__":
     logger.debug(f"Arguments: {vars(args)}")
 
     conf = bt.config(parser=parser)
-    subtensor = bt.AsyncSubtensor(config=conf)
     wallet = bt.wallet(config=conf)
-    w3_url = os.getenv("WEB3_PROVIDER_URL")
-    w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(w3_url)) if w3_url else None
+
+    pos_chain_url = os.getenv("POSITION_CHAIN_PROVIDER_URL")
+    distribution_subtensor = bt.AsyncSubtensor(config=conf)
+    pos_chain_subtensor = bt.AsyncSubtensor(config=conf, network=pos_chain_url)
+
+    w3 = (
+        AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(pos_chain_url)) if pos_chain_url else None
+    )
+
     if not w3:
-        logger.error("WEB3_PROVIDER_URL is not set or invalid. Cannot connect to Web3.")
+        logger.error(
+            "POSITION_CHAIN_PROVIDER_URL is not set or invalid. Cannot connect to Web3."
+        )
         sys.exit(1)
 
     # Parse days arguments if provided
@@ -433,7 +441,7 @@ if __name__ == "__main__":
             distribute_task = asyncio.create_task(
                 run_on_schedule(
                     task=distribute_rewards_task_to_lps,
-                    task_kwargs={"subtensor": subtensor},
+                    task_kwargs={"subtensor": distribution_subtensor},
                     frequency_secs=args.distribution_frequency
                     if args.distribution_schedule_hour is None
                     else None,
@@ -450,7 +458,7 @@ if __name__ == "__main__":
                     task=record_scores_for_distribution,
                     task_kwargs={
                         "db_path": args.db_path,
-                        "subtensor": subtensor,
+                        "subtensor": pos_chain_subtensor,
                         "wallet": wallet,
                         "web3_provider": w3,
                         "fee_check_period": args.fee_check_period,
