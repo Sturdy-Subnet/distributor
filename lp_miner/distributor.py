@@ -22,6 +22,7 @@ SECONDS_PER_HOUR = 3600  # 60 minutes * 60 seconds
 SECONDS_PER_BT_BLOCK = 12  # 12 seconds per block
 SECONDS_PER_DAY = 86400  # 24 hours * 60 minutes * 60 seconds
 SECONDS_PER_MINUTE = 60  # 60 seconds in a minute
+NETUID = 10  # netuid
 
 
 def add_args(parser: argparse.ArgumentParser):
@@ -70,8 +71,8 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--record-scores-frequency",
         type=int,
-        default=3600,
-        help="How often to record scores for distribution (in seconds). Default is 1 hour (3600 seconds).",
+        default=4320,
+        help="How often to record scores for distribution (in seconds). Default is 4320 Seconds (1.2 hours or 360 blocks).",
     )
 
     # Scheduling options for distribution
@@ -108,42 +109,6 @@ def add_args(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help="Days of week to distribute rewards (comma-separated: 0=Monday, 6=Sunday). e.g., '1' for Tuesday only, '0,2,4' for Mon/Wed/Fri.",
-    )
-
-    # Scheduling options for recording scores
-    parser.add_argument(
-        "--record-scores-schedule-timezone",
-        type=str,
-        default="UTC",
-        help="Timezone for recording scores schedule. Default is UTC.",
-    )
-
-    parser.add_argument(
-        "--record-scores-schedule-hour",
-        type=int,
-        default=None,
-        help="Hour of day to record scores (0-23). If not specified, uses frequency-based scheduling.",
-    )
-
-    parser.add_argument(
-        "--record-scores-schedule-minute",
-        type=int,
-        default=0,
-        help="Minute of hour to record scores (0-59). Default is 0.",
-    )
-
-    parser.add_argument(
-        "--record-scores-schedule-second",
-        type=int,
-        default=0,
-        help="Second of minute to record scores (0-59). Default is 0.",
-    )
-
-    parser.add_argument(
-        "--record-scores-schedule-days",
-        type=str,
-        default=None,
-        help="Days of week to record scores (comma-separated: 0=Monday, 6=Sunday).",
     )
 
     # a parameter used to specify how far back we go to check the fees LPs have made
@@ -306,8 +271,10 @@ async def run_on_schedule(
 async def record_scores_for_distribution(
     db_path: str,
     subtensor: bt.AsyncSubtensor,
+    wallet: bt.wallet,
     web3_provider: AsyncWeb3,
     fee_check_period: int,
+    frequency_secs: int,
 ) -> None:
     try:
         block_end = await subtensor.get_current_block()
@@ -315,6 +282,23 @@ async def record_scores_for_distribution(
         logger.info(
             f"Recording scores for distribution from block {block_start} to {block_end}..."
         )
+
+        start_block_stake = block_end - (frequency_secs // SECONDS_PER_BT_BLOCK)
+
+        # calculate delta stake for the lp miner that will be distributing rewards
+        stake_before = await subtensor.get_stake(
+            coldkey_ss58=wallet.coldkeypub.ss58_address,
+            hotkey_ss58=wallet.hotkey.ss58_address,
+            netuid=NETUID,
+            block=start_block_stake,
+        )
+        stake_after = await subtensor.get_stake(
+            coldkey_ss58=wallet.coldkeypub.ss58_address,
+            hotkey_ss58=wallet.hotkey.ss58_address,
+            netuid=NETUID,
+            block=block_end,
+        )
+        delta_stake = (stake_after - stake_before).tao
 
         # log the web3 provider URL
         if web3_provider is not None:
@@ -363,6 +347,7 @@ async def record_scores_for_distribution(
                 """
                 CREATE TABLE IF NOT EXISTS token_id_scores (
                     block_end INTEGER,
+                    delta_stake REAL,
                     growth_info TEXT,
                     scores TEXT
                 )
@@ -370,10 +355,10 @@ async def record_scores_for_distribution(
             )
             await db.execute(
                 """
-                INSERT INTO token_id_scores (block_end, growth_info, scores)
-                VALUES (?, json(?), json(?))
+                INSERT INTO token_id_scores (block_end, delta_stake, growth_info, scores)
+                VALUES (?, ?, json(?), json(?))
                 """,
-                (block_end, json_growth_info, json_scores),
+                (block_end, delta_stake, json_growth_info, json_scores),
             )
             await db.commit()
 
@@ -405,6 +390,7 @@ if __name__ == "__main__":
     add_args(parser)
     # Parse command line arguments
     bt.subtensor.add_args(parser)
+    bt.wallet.add_args(parser)
     args = parser.parse_args()
 
     # Setup logging first
@@ -415,6 +401,7 @@ if __name__ == "__main__":
 
     conf = bt.config(parser=parser)
     subtensor = bt.AsyncSubtensor(config=conf)
+    wallet = bt.wallet(config=conf)
     w3_url = os.getenv("WEB3_PROVIDER_URL")
     w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(w3_url)) if w3_url else None
     if not w3:
@@ -435,21 +422,6 @@ if __name__ == "__main__":
             logger.info(f"Distribution scheduled for days: {distribution_days}")
         except ValueError as e:
             logger.error(f"Error parsing distribution schedule days: {e}")
-            exit(1)
-
-    record_scores_days = None
-    if args.record_scores_schedule_days:
-        try:
-            record_scores_days = [
-                int(d.strip()) for d in args.record_scores_schedule_days.split(",")
-            ]
-            # Validate day values
-            for day in record_scores_days:
-                if not 0 <= day <= 6:
-                    raise ValueError(f"Day must be between 0-6, got {day}")
-            logger.info(f"Score recording scheduled for days: {record_scores_days}")
-        except ValueError as e:
-            logger.error(f"Error parsing record scores schedule days: {e}")
             exit(1)
 
     # Create async tasks for both functions
@@ -479,17 +451,12 @@ if __name__ == "__main__":
                     task_kwargs={
                         "db_path": args.db_path,
                         "subtensor": subtensor,
+                        "wallet": wallet,
                         "web3_provider": w3,
                         "fee_check_period": args.fee_check_period,
+                        "frequency_secs": args.record_scores_frequency,
                     },
-                    frequency_secs=args.record_scores_frequency
-                    if args.record_scores_schedule_hour is None
-                    else None,
-                    timezone=args.record_scores_schedule_timezone,
-                    hour=args.record_scores_schedule_hour,
-                    minute=args.record_scores_schedule_minute,
-                    second=args.record_scores_schedule_second,
-                    days=record_scores_days,
+                    frequency_secs=args.record_scores_frequency,
                 )
             )
 
@@ -509,13 +476,8 @@ if __name__ == "__main__":
         frequency_info = f"Running distribute_rewards_task_to_lps every {args.distribution_frequency} seconds..."
         logger.info(frequency_info)
 
-    if args.record_scores_schedule_hour is not None:
-        days_str = f" on days {record_scores_days}" if record_scores_days else " daily"
-        schedule_info = f"Score recording scheduled for {args.record_scores_schedule_hour:02d}:{args.record_scores_schedule_minute:02d}:{args.record_scores_schedule_second:02d} {args.record_scores_schedule_timezone}{days_str}"
-        logger.info(schedule_info)
-    else:
-        frequency_info = f"Running record_scores_for_distribution every {args.record_scores_frequency} seconds..."
-        logger.info(frequency_info)
+    frequency_info = f"Running record_scores_for_distribution every {args.record_scores_frequency} seconds..."
+    logger.info(frequency_info)
 
     try:
         asyncio.run(main())
