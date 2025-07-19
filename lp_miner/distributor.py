@@ -369,7 +369,71 @@ async def record_scores_for_distribution(
         raise
 
 
-async def distribute_rewards_task_to_lps(subtensor: bt.AsyncSubtensor) -> None:
+async def calculate_reward_distribution(db_path: str) -> dict[str, float]:
+    """
+    Calculate distribution information from the database.
+    This is done by adding up the delta scores and the scores for the owners of the token ids
+    And then normalzing the sum to determine how to distribute the rewards (sum of delta stake).
+    """
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute(
+                "SELECT block_end, delta_stake, growth_info, scores FROM token_id_scores"
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        if not rows:
+            logger.warning("No records found in the database.")
+            return []
+
+        # sum of delta stake
+        total_delta_stake = sum(row[1] for row in rows)
+
+        # owner -> reward
+        score_distribution = {}
+
+        for row in rows:
+            block_end, delta_stake, growth_info, scores = row
+            scores = json.loads(scores)
+            growth_info = json.loads(growth_info)
+
+            for token_id, score in scores.items():
+                owner = growth_info[token_id]["owner"]
+                if owner not in score_distribution:
+                    score_distribution[owner] = 0.0
+                score_distribution[owner] += score * delta_stake
+
+        # Normalize scores by max score in score_distribution
+        max_score = max(score_distribution.values(), default=1.0)
+        normalized_distribution = {
+            owner: score / max_score for owner, score in score_distribution.items()
+        }
+
+        # Normalize the distribution by total delta stake to obtain reward distribution
+        if total_delta_stake > 0:
+            reward_distribution = {
+                owner: score * total_delta_stake
+                for owner, score in normalized_distribution.items()
+            }
+        else:
+            logger.warning("Total delta stake is zero, cannot normalize distribution.")
+            reward_distribution = {owner: 0.0 for owner in normalized_distribution}
+
+        # sort the distribution by the reward amount in descending order
+        reward_distribution = dict(
+            sorted(reward_distribution.items(), key=lambda item: item[1], reverse=True)
+        )
+
+        return reward_distribution
+
+    except Exception as e:
+        logger.error(f"Error calculating reward distribution: {e}")
+        raise
+
+
+async def distribute_rewards_task_to_lps(
+    subtensor: bt.AsyncSubtensor, db_path: str = ":memory:"
+) -> None:
     """
     Distribute rewards to LPs based on the fee growth of their positions.
     This function calculates the fee growth for each position and distributes rewards accordingly.
@@ -377,7 +441,14 @@ async def distribute_rewards_task_to_lps(subtensor: bt.AsyncSubtensor) -> None:
     try:
         logger.info("Starting reward distribution to LPs...")
         # TODO: Implement the actual distribution logic
-        logger.warning("Reward distribution logic not yet implemented")
+        # calculate the reward distribution
+        reward_distribution = await calculate_reward_distribution(db_path=db_path)
+
+        logger.info(
+            f"Calculated reward distribution for {len(reward_distribution)} LPs: {reward_distribution}"
+        )
+
+        logger.warning("Reward distribution logic not yet fully implemented")
 
     except Exception as e:
         logger.error(f"Error distributing rewards to LPs: {e}")
@@ -441,7 +512,10 @@ if __name__ == "__main__":
             distribute_task = asyncio.create_task(
                 run_on_schedule(
                     task=distribute_rewards_task_to_lps,
-                    task_kwargs={"subtensor": distribution_subtensor},
+                    task_kwargs={
+                        "subtensor": distribution_subtensor,
+                        "db_path": args.db_path,
+                    },
                     frequency_secs=args.distribution_frequency
                     if args.distribution_schedule_hour is None
                     else None,
