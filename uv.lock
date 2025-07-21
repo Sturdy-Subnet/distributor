@@ -1672,13 +1672,13 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "ruff", specifier = ">=0.12.4" },
-    { name = "sturdy-subnet", git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=4.0.4" },
+    { name = "sturdy-subnet", git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=4.0.7" },
 ]
 
 [[package]]
 name = "sturdy-subnet"
-version = "4.0.4"
-source = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=4.0.4#bbdde52e2bcff1e677536663458339d45884e159" }
+version = "4.0.7"
+source = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=4.0.7#9fc170d3b788deae387516818acf2be83705304e" }
 dependencies = [
     { name = "annotated-types" },
     { name = "anyio" },
