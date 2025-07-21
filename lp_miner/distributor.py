@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 import dataclasses
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import bittensor as bt
 from typing import Callable, Optional, List
@@ -46,7 +46,7 @@ def setup_logging(log_dir: str, log_level: str, log_rotation: str, log_retention
     logger.add(
         sys.stderr,
         level=log_level,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        format="<green>{time:YYYY-MM-DD HH:mm:ss!UTC} UTC</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         colorize=True,
     )
 
@@ -58,13 +58,226 @@ def setup_logging(log_dir: str, log_level: str, log_rotation: str, log_retention
     logger.add(
         log_file_path,
         level=log_level,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        format="{time:YYYY-MM-DD HH:mm:ss!UTC} UTC | {level: <8} | {name}:{function}:{line} - {message}",
         rotation=log_rotation,
         retention=log_retention,
         compression="zip",
     )
 
     logger.info(f"Logging initialized - Level: {log_level}, Log dir: {log_dir}")
+
+
+async def should_record_scores(
+    db_path: str, current_block: int, frequency_secs: int
+) -> tuple[bool, Optional[int]]:
+    """
+    Determine if we should record scores based on the last recorded block and frequency.
+
+    Returns:
+        tuple[bool, Optional[int]]: (should_record, next_record_block)
+            - should_record: True if we should record scores now
+            - next_record_block: The block number when we should next record scores (None if should_record is True)
+    """
+    try:
+        frequency_blocks = frequency_secs // SECONDS_PER_BT_BLOCK
+
+        async with aiosqlite.connect(db_path) as db:
+            # Get the most recent score record
+            async with db.execute(
+                "SELECT MAX(block_end) FROM token_id_scores"
+            ) as cursor:
+                result = await cursor.fetchone()
+                last_recorded_block = result[0] if result[0] is not None else 0
+
+        # Calculate when we should next record scores
+        next_record_block = last_recorded_block + frequency_blocks
+
+        # If we haven't recorded anything yet, or enough blocks have passed
+        if last_recorded_block == 0 or current_block >= next_record_block:
+            logger.debug(
+                f"Should record scores: current_block={current_block}, last_recorded={last_recorded_block}, frequency_blocks={frequency_blocks}"
+            )
+            return True, None
+        else:
+            blocks_remaining = next_record_block - current_block
+            logger.debug(
+                f"Skipping score recording: {blocks_remaining} blocks remaining until next window (next at block {next_record_block})"
+            )
+            return False, next_record_block
+
+    except Exception as e:
+        logger.error(f"Error checking if should record scores: {e}")
+        # If we can't determine, default to recording
+        return True, None
+
+
+async def should_queue_distribution(
+    db_path: str, current_time: datetime, distribution_schedule: dict, coldkey: str
+) -> tuple[bool, Optional[datetime]]:
+    """
+    Determine if we should queue distribution based on the last distribution and schedule.
+
+    Returns:
+        tuple[bool, Optional[datetime]]: (should_queue, next_queue_time)
+            - should_queue: True if we should queue distribution now
+            - next_queue_time: The time when we should next queue distribution (None if should_queue is True)
+    """
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            # Get the most recent distribution queue time for this coldkey
+            async with db.execute(
+                "SELECT MAX(created_at) FROM transfers WHERE origin_coldkey = ?",
+                (coldkey,),
+            ) as cursor:
+                result = await cursor.fetchone()
+                last_queued_str = result[0] if result[0] is not None else None
+
+        # If no previous distributions, we should queue
+        if last_queued_str is None:
+            logger.debug("No previous distributions found, should queue distribution")
+            return True, None
+
+        # Parse the last queued time and ensure timezone consistency
+        if last_queued_str.endswith("Z"):
+            # Handle UTC timestamps with Z suffix
+            last_queued = datetime.fromisoformat(last_queued_str.replace("Z", "+00:00"))
+        elif "+" in last_queued_str or last_queued_str.count("-") > 2:
+            # Already has timezone info
+            last_queued = datetime.fromisoformat(last_queued_str)
+        else:
+            # Assume UTC if no timezone info
+            last_queued = datetime.fromisoformat(last_queued_str).replace(
+                tzinfo=ZoneInfo("UTC")
+            )
+
+        # Ensure both datetimes have timezone info for comparison
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=ZoneInfo("UTC"))
+        if last_queued.tzinfo is None:
+            last_queued = last_queued.replace(tzinfo=ZoneInfo("UTC"))
+
+        # Convert both to the same timezone for comparison
+        target_tz = ZoneInfo(distribution_schedule.get("timezone", "UTC"))
+        current_time = current_time.astimezone(target_tz)
+        last_queued = last_queued.astimezone(target_tz)
+
+        # Calculate next distribution time based on schedule
+        if distribution_schedule.get("hour") is not None:
+            # Time-based scheduling
+            next_queue_time = calculate_next_scheduled_time(
+                current_time, distribution_schedule
+            )
+
+            # Check if enough time has passed since last distribution
+            if (
+                current_time >= next_queue_time
+                and (current_time - last_queued).total_seconds() >= 3600
+            ):  # At least 1 hour gap
+                logger.debug(
+                    f"Should queue distribution: current_time={current_time}, last_queued={last_queued}, next_queue_time={next_queue_time}"
+                )
+                return True, None
+            else:
+                logger.debug(
+                    f"Skipping distribution queue: next scheduled at {next_queue_time}"
+                )
+                return False, next_queue_time
+        else:
+            # Frequency-based scheduling
+            frequency_secs = distribution_schedule.get("frequency_secs", 86400)
+            next_queue_time = last_queued + timedelta(seconds=frequency_secs)
+
+            if current_time >= next_queue_time:
+                logger.debug(
+                    f"Should queue distribution: current_time={current_time}, last_queued={last_queued}, frequency={frequency_secs}s"
+                )
+                return True, None
+            else:
+                time_remaining = (next_queue_time - current_time).total_seconds()
+                logger.debug(
+                    f"Skipping distribution queue: {time_remaining:.0f}s remaining until next window"
+                )
+                return False, next_queue_time
+
+    except Exception as e:
+        logger.error(f"Error checking if should queue distribution: {e}")
+        # If we can't determine, default to queuing
+        return True, None
+
+
+def calculate_next_scheduled_time(
+    current_time: datetime, distribution_schedule: dict
+) -> datetime:
+    """Calculate the next scheduled distribution time based on the schedule."""
+    try:
+        timezone = ZoneInfo(distribution_schedule.get("timezone", "UTC"))
+        hour = distribution_schedule.get("hour", 0)
+        minute = distribution_schedule.get("minute", 0)
+        second = distribution_schedule.get("second", 0)
+        days = distribution_schedule.get("days")
+
+        # Ensure current_time is in the target timezone
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone)
+        else:
+            current_time = current_time.astimezone(timezone)
+
+        # Start with today at the scheduled time
+        next_time = current_time.replace(
+            hour=hour,
+            minute=minute,
+            second=second,
+            microsecond=0,
+        )
+
+        # If the time has already passed today, move to tomorrow
+        if next_time <= current_time:
+            next_time += timedelta(days=1)
+
+        # If specific days are configured, find the next valid day
+        if days is not None:
+            while next_time.weekday() not in days:
+                next_time += timedelta(days=1)
+
+        return next_time
+
+    except Exception as e:
+        logger.error(f"Error calculating next scheduled time: {e}")
+        # Default to 24 hours from now, ensuring timezone consistency
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=ZoneInfo("UTC"))
+        return current_time + timedelta(days=1)
+
+
+async def check_sufficient_scores_for_distribution(
+    db_path: str, start_block: int, min_score_records: int = 1
+) -> tuple[bool, int]:
+    """
+    Check if we have sufficient score records to perform a meaningful distribution.
+
+    Returns:
+        tuple[bool, int]: (sufficient_scores, record_count)
+            - sufficient_scores: True if we have enough records
+            - record_count: Number of score records found
+    """
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM token_id_scores WHERE block_start_stake >= ?",
+                (start_block,),
+            ) as cursor:
+                result = await cursor.fetchone()
+                record_count = result[0] if result[0] is not None else 0
+
+        sufficient = record_count >= min_score_records
+        logger.debug(
+            f"Score records check: {record_count} records found since block {start_block}, sufficient: {sufficient}"
+        )
+        return sufficient, record_count
+
+    except Exception as e:
+        logger.error(f"Error checking score records: {e}")
+        return False, 0
 
 
 async def run_on_schedule(
@@ -141,16 +354,248 @@ async def run_on_schedule(
         logger.info(
             f"Starting frequency-based scheduling for {task.__name__} every {frequency_secs} seconds"
         )
-        last_run_time = 0
-        while True:
+
+        # Use intelligent scheduling for specific tasks
+        if task.__name__ == "record_scores_for_distribution":
+            await run_intelligent_score_recording(
+                task, task_args, task_kwargs, frequency_secs
+            )
+        elif task.__name__ == "queue_distribution":
+            await run_intelligent_distribution_queueing(
+                task, task_args, task_kwargs, frequency_secs
+            )
+        else:
+            # Regular frequency-based scheduling for other tasks
+            last_run_time = 0
+            while True:
+                current_time = datetime.now().timestamp()
+
+                if current_time - last_run_time >= frequency_secs:
+                    logger.debug(f"Running scheduled task {task.__name__}")
+                    asyncio.create_task(task(*task_args, **task_kwargs))
+                    last_run_time = current_time
+
+                await asyncio.sleep(1)  # Check every second
+
+
+async def run_intelligent_score_recording(
+    task: Callable, task_args: tuple, task_kwargs: dict, frequency_secs: int
+):
+    """
+    Intelligent scheduling for score recording that avoids duplicate records
+    and optimizes timing based on blockchain state.
+    """
+    logger.info(
+        f"Starting intelligent score recording with {frequency_secs}s frequency"
+    )
+
+    # Extract required parameters for should_record_scores
+    db_path = task_kwargs.get("db_path")
+    subtensor = task_kwargs.get("subtensor")
+
+    if not db_path or not subtensor:
+        logger.error("Missing required parameters for intelligent scheduling")
+        return
+
+    last_check_time = 0
+    check_interval = 60  # Check every minute instead of every second
+
+    while True:
+        try:
             current_time = datetime.now().timestamp()
 
-            if current_time - last_run_time >= frequency_secs:
-                logger.debug(f"Running scheduled task {task.__name__}")
-                asyncio.create_task(task(*task_args, **task_kwargs))
-                last_run_time = current_time
+            # Only check blockchain state periodically to avoid excessive calls
+            if current_time - last_check_time >= check_interval:
+                current_block = await subtensor.get_current_block()
+                should_record, next_record_block = await should_record_scores(
+                    db_path, current_block, frequency_secs
+                )
 
-            await asyncio.sleep(1)  # Check every second
+                if should_record:
+                    logger.info(f"Recording scores at block {current_block}")
+                    asyncio.create_task(task(*task_args, **task_kwargs))
+                    # After recording, wait at least the minimum interval before checking again
+                    last_check_time = current_time
+                    await asyncio.sleep(
+                        max(60, frequency_secs // 10)
+                    )  # Wait 10% of frequency or 1 min
+                elif next_record_block:
+                    # Calculate how long to wait based on blocks remaining
+                    blocks_remaining = next_record_block - current_block
+                    wait_seconds = max(
+                        60, blocks_remaining * SECONDS_PER_BT_BLOCK * 0.9
+                    )  # Wait 90% of the time
+                    logger.debug(
+                        f"Next score recording in ~{blocks_remaining} blocks ({wait_seconds:.0f}s)"
+                    )
+                    last_check_time = current_time
+                    await asyncio.sleep(min(wait_seconds, check_interval))
+                else:
+                    last_check_time = current_time
+                    await asyncio.sleep(check_interval)
+            else:
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Error in intelligent score recording: {e}")
+            await asyncio.sleep(check_interval)
+
+
+async def run_intelligent_distribution_queueing(
+    task: Callable, task_args: tuple, task_kwargs: dict, frequency_secs: int
+):
+    """
+    Intelligent scheduling for distribution queueing that avoids duplicate distributions
+    and ensures sufficient data availability before queueing.
+    """
+    logger.info(
+        f"Starting intelligent distribution queueing with {frequency_secs}s frequency"
+    )
+
+    # Extract required parameters
+    db_path = task_kwargs.get("db_path")
+    distribution_schedule = task_kwargs.get("distribution_schedule", {})
+    pos_chain_subtensor = task_kwargs.get("pos_chain_subtensor")
+    wallet = task_kwargs.get("wallet")
+
+    if (
+        not db_path
+        or not distribution_schedule
+        or not pos_chain_subtensor
+        or not wallet
+    ):
+        logger.error(
+            "Missing required parameters for intelligent distribution scheduling"
+        )
+        return
+
+    coldkey = wallet.coldkeypub.ss58_address
+    last_check_time = 0
+    check_interval = 300  # Check every 5 minutes for distributions
+
+    while True:
+        try:
+            current_time_ts = datetime.now().timestamp()
+            current_time = datetime.now(
+                ZoneInfo(distribution_schedule.get("timezone", "UTC"))
+            )
+
+            # Only check periodically to avoid excessive calls
+            if current_time_ts - last_check_time >= check_interval:
+                should_queue, next_queue_time = await should_queue_distribution(
+                    db_path, current_time, distribution_schedule, coldkey
+                )
+
+                if should_queue:
+                    # Additional check: ensure we have sufficient score data
+                    current_block = await pos_chain_subtensor.get_current_block()
+
+                    # Calculate how far back to look based on distribution schedule
+                    if distribution_schedule.get("hour") is not None:
+                        # For time-based scheduling, look back to the last scheduled time
+                        seconds_to_look_back = calculate_lookback_seconds(
+                            current_time, distribution_schedule
+                        )
+                    else:
+                        seconds_to_look_back = distribution_schedule.get(
+                            "frequency_secs", 86400
+                        )
+
+                    blocks_to_lookback = (
+                        int(seconds_to_look_back) // SECONDS_PER_BT_BLOCK
+                    )
+                    start_block = max(1, current_block - blocks_to_lookback)
+
+                    (
+                        sufficient_scores,
+                        record_count,
+                    ) = await check_sufficient_scores_for_distribution(
+                        db_path, start_block, min_score_records=1
+                    )
+
+                    if sufficient_scores:
+                        logger.info(
+                            f"Queueing distribution with {record_count} score records since block {start_block}"
+                        )
+                        asyncio.create_task(task(*task_args, **task_kwargs))
+                        # After queueing, wait before checking again
+                        last_check_time = current_time_ts
+                        await asyncio.sleep(
+                            max(300, frequency_secs // 4)
+                        )  # Wait 25% of frequency or 5 min
+                    else:
+                        logger.info(
+                            f"Insufficient score data for distribution ({record_count} records since block {start_block})"
+                        )
+                        last_check_time = current_time_ts
+                        await asyncio.sleep(check_interval)
+
+                elif next_queue_time:
+                    # Calculate how long to wait until next distribution
+                    wait_seconds = (next_queue_time - current_time).total_seconds()
+                    wait_seconds = max(
+                        300, wait_seconds * 0.9
+                    )  # Wait 90% of the time or 5 min
+                    logger.debug(
+                        f"Next distribution queue at {next_queue_time} ({wait_seconds:.0f}s)"
+                    )
+                    last_check_time = current_time_ts
+                    await asyncio.sleep(min(wait_seconds, check_interval))
+                else:
+                    last_check_time = current_time_ts
+                    await asyncio.sleep(check_interval)
+            else:
+                await asyncio.sleep(
+                    30
+                )  # Check every 30 seconds when not in check window
+
+        except Exception as e:
+            logger.error(f"Error in intelligent distribution queueing: {e}")
+            await asyncio.sleep(check_interval)
+
+
+def calculate_lookback_seconds(
+    current_time: datetime, distribution_schedule: dict
+) -> int:
+    """Calculate how many seconds to look back based on distribution schedule."""
+    try:
+        if distribution_schedule.get("hour") is not None:
+            # For time-based scheduling, calculate time since last scheduled run
+            hour = distribution_schedule.get("hour", 0)
+            minute = distribution_schedule.get("minute", 0)
+            second = distribution_schedule.get("second", 0)
+            days = distribution_schedule.get("days")
+
+            # Ensure current_time has timezone info
+            timezone = ZoneInfo(distribution_schedule.get("timezone", "UTC"))
+            if current_time.tzinfo is None:
+                current_time = current_time.replace(tzinfo=timezone)
+            else:
+                current_time = current_time.astimezone(timezone)
+
+            # Find the most recent scheduled time
+            last_scheduled = current_time.replace(
+                hour=hour, minute=minute, second=second, microsecond=0
+            )
+
+            # If we haven't reached today's scheduled time, go back to yesterday
+            if last_scheduled > current_time:
+                last_scheduled -= timedelta(days=1)
+
+            # If specific days are configured, find the most recent valid day
+            if days is not None:
+                while last_scheduled.weekday() not in days:
+                    last_scheduled -= timedelta(days=1)
+
+            lookback_seconds = (current_time - last_scheduled).total_seconds()
+            return max(3600, int(lookback_seconds))  # At least 1 hour
+        else:
+            # For frequency-based scheduling
+            return distribution_schedule.get("frequency_secs", 86400)
+
+    except Exception as e:
+        logger.error(f"Error calculating lookback seconds: {e}")
+        return 86400  # Default to 24 hours
 
 
 async def record_scores_for_distribution(
@@ -164,6 +609,21 @@ async def record_scores_for_distribution(
 ) -> None:
     try:
         block_end = await subtensor.get_current_block()
+
+        # Check if we should record scores to avoid duplicates
+        should_record, next_record_block = await should_record_scores(
+            db_path, block_end, frequency_secs
+        )
+
+        if not should_record:
+            if next_record_block:
+                logger.info(
+                    f"Skipping score recording - next recording at block {next_record_block}"
+                )
+            else:
+                logger.info("Skipping score recording - too soon since last record")
+            return
+
         block_start = block_end - (fee_check_period // SECONDS_PER_BT_BLOCK)
         logger.info(
             f"Recording scores for distribution from block {block_start} to {block_end}..."
@@ -278,7 +738,7 @@ async def calculate_reward_distribution(
     try:
         async with aiosqlite.connect(db_path) as db:
             async with db.execute(
-                "SELECT block_start, block_start_stake, block_end, delta_stake, growth_info, scores FROM token_id_scores WHERE block_start_stake >= ?",
+                "SELECT block_start_stake, delta_stake, growth_info, scores FROM token_id_scores WHERE block_start_stake >= ?",
                 (start_block,),
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -292,9 +752,7 @@ async def calculate_reward_distribution(
         stake_periods = {}
         for row in rows:
             (
-                _,
                 block_start_stake,
-                block_end,
                 delta_stake,
                 growth_info,
                 scores,
@@ -320,7 +778,7 @@ async def calculate_reward_distribution(
         score_distribution = {}
 
         for row in rows:
-            block_end, delta_stake, growth_info, scores = row
+            _, delta_stake, growth_info, scores = row
             scores = json.loads(scores)
             growth_info = json.loads(growth_info)
 
@@ -379,7 +837,7 @@ async def calculate_reward_distribution(
         raise
 
 
-async def distribute_rewards_task_to_lps(
+async def queue_distribution(
     distribution_subtensor: bt.AsyncSubtensor,
     pos_chain_subtensor: bt.AsyncSubtensor,
     wallet: bt.Wallet,
@@ -389,11 +847,11 @@ async def distribute_rewards_task_to_lps(
     db_path: str = ":memory:",
 ) -> None:
     """
-    Distribute rewards to LPs based on the fee growth of their positions.
-    This function calculates the fee growth for each position and distributes rewards accordingly.
+    Queue rewards distribution to LPs based on the fee growth of their positions.
+    This function calculates the fee growth for each position and queues rewards accordingly.
     """
     try:
-        logger.info("Starting reward distribution to LPs...")
+        logger.info("Starting rewards distribution queueing...")
 
         # get the current block number
         current_block = await pos_chain_subtensor.get_current_block()
@@ -426,6 +884,9 @@ async def distribute_rewards_task_to_lps(
         blocks_to_lookback = int(seconds_to_look_back) // SECONDS_PER_BT_BLOCK
         current_block = await pos_chain_subtensor.get_current_block()
         start_block = max(1, current_block - blocks_to_lookback)
+        logger.info(
+            f"Calculating rewards distribution starting from block {start_block} (looking back {seconds_to_look_back} seconds)"
+        )
 
         # Calculate the reward distribution
         reward_distribution = await calculate_reward_distribution(db_path, start_block)
@@ -438,7 +899,7 @@ async def distribute_rewards_task_to_lps(
             f"Calculated reward distribution for {len(reward_distribution)} LPs: {reward_distribution}"
         )
 
-        successful_distributions = 0
+        queued_distributions = 0
         failed_distributions = 0
 
         for owner_h160, reward in reward_distribution.items():
@@ -447,22 +908,30 @@ async def distribute_rewards_task_to_lps(
                     # Convert H160 address to SS58 format for Bittensor transfer
                     owner_ss58 = h160_to_ss58(owner_h160)
 
-                    logger.info(f"Converting LP address: {owner_h160} -> {owner_ss58}")
                     logger.info(
-                        f"Distributing {reward} to LP {owner_ss58} (h160: {owner_h160}) from {origin_hotkey} to {destination_hotkey}"
+                        f"Queuing distribution: {wallet.coldkeypub.ss58_address} --- {reward} ---> {owner_ss58} (H160: {owner_h160})"
                     )
 
-                    # Here we would implement the actual transfer logic
-                    # For now, we just log the action with the converted address
-                    # await distribution_subtensor.transfer_stake(
-                    #     wallet=wallet,
-                    #     hotkey_ss58=owner_ss58,
-                    #     destination_ss58=destination_hotkey,
-                    #     amount=reward,
-                    #     netuid=NETUID,
-                    # )
+                    # queue the transfer in the database
+                    async with aiosqlite.connect(db_path) as db:
+                        await db.execute(
+                            """
+                            INSERT INTO transfers (status, origin_coldkey, destination_coldkey, destination_h160, origin_hotkey, destination_hotkey, amount)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                "pending",
+                                wallet.coldkeypub.ss58_address,
+                                owner_ss58,
+                                owner_h160,
+                                origin_hotkey,
+                                origin_hotkey,  # TODO: for now we transfer to the same hotkey, but we'd may want to move stake to a different hotkey in the future
+                                reward.tao,
+                            ),
+                        )
+                        await db.commit()
 
-                    successful_distributions += 1
+                    queued_distributions += 1
 
                 except ValueError as e:
                     logger.error(f"Failed to convert address {owner_h160}: {e}")
@@ -476,22 +945,155 @@ async def distribute_rewards_task_to_lps(
                 logger.debug(f"Skipping zero reward for LP {owner_h160}")
 
         # Log distribution summary
-        total_attempts = successful_distributions + failed_distributions
+        total_attempts = queued_distributions + failed_distributions
         if total_attempts > 0:
             logger.info(
-                f"Reward distribution completed: {successful_distributions} successful, {failed_distributions} failed"
+                f"Reward distribution transactions: {queued_distributions} queued, {failed_distributions} failed"
             )
             if failed_distributions > 0:
                 logger.warning(
                     f"{failed_distributions} distributions failed - check logs for details"
                 )
         else:
-            logger.info("No rewards to distribute, skipping distribution.")
+            logger.info("No rewards to distribute, skipping queueing distribution.")
 
         logger.warning("Reward distribution logic not yet fully implemented")
 
     except Exception as e:
-        logger.error(f"Error distributing rewards to LPs: {e}")
+        logger.error("Error queueing rewards distribution to LPs")
+        logger.exception(e)
+        raise
+
+
+async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
+    """Initiate transfers of rewards to LPs based on the queued transfers in the database."""
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            # Fetch all pending transfers from the database, and where origin_coldkey matches the wallet's coldkey
+            async with db.execute(
+                "SELECT id, origin_coldkey, destination_coldkey, destination_h160, origin_hotkey, destination_hotkey, amount FROM transfers WHERE status = 'pending' AND origin_coldkey = ?",
+                (wallet.coldkeypub.ss58_address,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        if not rows:
+            logger.info("No pending transfers found in the database.")
+            return
+
+        for row in rows:
+            (
+                transfer_id,
+                origin_coldkey,
+                destination_coldkey,
+                destination_h160,
+                origin_hotkey,
+                destination_hotkey,
+                amount_tao,
+            ) = row
+            amount = bt.Balance.from_tao(amount_tao, netuid=NETUID)
+            try:
+                # Here we would implement the actual transfer logic
+                # For now, we just log the action
+                logger.info(
+                    f"Transferring: {origin_coldkey} --- {amount} ---> {destination_coldkey} (H160: {destination_h160})"
+                )
+                # TODO: Here we would implement the actual transfer logic
+                # For now, we just log the action with the converted address
+                # await distribution_subtensor.transfer_stake(
+                #     wallet=wallet,
+                #     destination_coldkey_ss58=origin_coldkey,
+                #     hotkey_ss58=origin_hotkey,
+                #     amount=amount,
+                #     origin_netuid=NETUID,
+                #     destination_netuid=NETUID,
+                # )
+
+                # Update the transfer status to completed
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE transfers SET status = 'completed' WHERE id = ?",
+                        (transfer_id,),
+                    )
+                    await db.commit()
+
+            except Exception as e:
+                logger.error(f"Failed to complete transfer {transfer_id}: {e}")
+                # Update the transfer status to failed
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE transfers SET status = 'failed' WHERE id = ?",
+                        (transfer_id,),
+                    )
+                    await db.commit()
+
+    except Exception as e:
+        logger.error("Error running transfers")
+        logger.exception(e)
+        raise
+
+
+async def retry_failed_transfers(db_path: str, wallet: bt.Wallet):
+    """Retry failed transfers from the database."""
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute(
+                "SELECT id, origin_coldkey, destination_coldkey, destination_h160, origin_hotkey, destination_hotkey, amount FROM transfers WHERE status = 'failed'"
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        if not rows:
+            logger.info("No failed transfers found in the database.")
+            return
+
+        for row in rows:
+            (
+                transfer_id,
+                origin_coldkey,
+                destination_coldkey,
+                destination_h160,
+                origin_hotkey,
+                destination_hotkey,
+                amount,
+            ) = row
+            try:
+                # Here we would implement the actual retry logic
+                # For now, we just log the action
+                logger.info(
+                    f"Retrying transfer: {origin_coldkey} --- {amount} ---> {destination_coldkey} (H160: {destination_h160})"
+                )
+
+                # TODO: Here we would implement the actual transfer logic
+                # For now, we just log the action with the converted address
+                # await distribution_subtensor.transfer_stake(
+                #     wallet=wallet,
+                #     destination_coldkey_ss58=origin_coldkey,
+                #     hotkey_ss58=origin_hotkey,
+                #     amount=amount,
+                #     origin_netuid=NETUID,
+                #     destination_netuid=NETUID,
+                # )
+
+                # Update the transfer status to completed
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE transfers SET status = 'completed' WHERE id = ?",
+                        (transfer_id,),
+                    )
+                    await db.commit()
+
+            except Exception as e:
+                logger.error(f"Failed to retry transfer {transfer_id}: {e}")
+                # Update the transfer status to failed again
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE transfers SET status = 'failed' WHERE id = ?",
+                        (transfer_id,),
+                    )
+                    await db.commit()
+
+    except Exception as e:
+        logger.error("Error retrying failed distributions")
+        logger.exception(e)
         raise
 
 
@@ -520,7 +1122,7 @@ if __name__ == "__main__":
         else distribution_wallet.coldkeypub.ss58_address
     )
     hotkey = (
-        args.stake_hotkeyS
+        args.stake_hotkey
         if args.stake_hotkey
         else distribution_wallet.hotkey.ss58_address
     )
@@ -600,9 +1202,9 @@ if __name__ == "__main__":
                 )
             )
 
-            distribute_task = asyncio.create_task(
+            queue_distribution_task = asyncio.create_task(
                 run_on_schedule(
-                    task=distribute_rewards_task_to_lps,
+                    task=queue_distribution,
                     task_kwargs={
                         "distribution_subtensor": distribution_subtensor,
                         "pos_chain_subtensor": pos_chain_subtensor,
@@ -612,7 +1214,7 @@ if __name__ == "__main__":
                         "db_path": args.db_path,
                         "distribution_schedule": distribution_schedule,
                     },
-                    # TODO: use distribution_schedulte to determine how often to run this task instead
+                    # TODO: use distribution_schedule to determine how often to run this task instead
                     frequency_secs=args.distribution_frequency
                     if args.distribution_schedule_hour is None
                     else None,
@@ -623,8 +1225,38 @@ if __name__ == "__main__":
                     days=distribution_days,
                 )
             )
+
+            # Task to periodically run pending transfers
+            pending_transfers_task = asyncio.create_task(
+                run_on_schedule(
+                    task=run_pending_transfers,
+                    task_kwargs={
+                        "db_path": args.db_path,
+                        "wallet": distribution_wallet,
+                    },
+                    frequency_secs=args.pending_frequency,
+                )
+            )
+
+            # Task to periodically retry failed transfers
+            retry_failed_transfers_task = asyncio.create_task(
+                run_on_schedule(
+                    task=retry_failed_transfers,
+                    task_kwargs={
+                        "db_path": args.db_path,
+                        "wallet": distribution_wallet,
+                    },
+                    frequency_secs=args.retry_frequency,
+                )
+            )
+
             # Wait for both tasks to complete (they run indefinitely)
-            await asyncio.gather(distribute_task, record_scores_task)
+            await asyncio.gather(
+                record_scores_task,
+                queue_distribution_task,
+                pending_transfers_task,
+                retry_failed_transfers_task,
+            )
 
         except Exception as e:
             logger.error(f"Error in main async function: {e}")
@@ -639,7 +1271,9 @@ if __name__ == "__main__":
         schedule_info = f"Distribution scheduled for {args.distribution_schedule_hour:02d}:{args.distribution_schedule_minute:02d}:{args.distribution_schedule_second:02d} {args.distribution_schedule_timezone}{days_str}"
         logger.info(schedule_info)
     else:
-        frequency_info = f"Running distribute_rewards_task_to_lps every {args.distribution_frequency} seconds..."
+        frequency_info = (
+            f"Running queue_distribution every {args.distribution_frequency} seconds..."
+        )
         logger.info(frequency_info)
 
     try:

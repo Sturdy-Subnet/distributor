@@ -87,6 +87,22 @@ def add_args(parser: argparse.ArgumentParser):
         help="Days of week to distribute rewards (comma-separated: 0=Monday, 6=Sunday). e.g., '1' for Tuesday only, '0,2,4' for Mon/Wed/Fri.",
     )
 
+    # Frequency for running pending transfers
+    parser.add_argument(
+        "--pending-frequency",
+        type=int,
+        default=3600,
+        help="How often to run pending transfers (in seconds). Default is 1 hour (3600 seconds).",
+    )
+
+    # Frequency for retrying failed transfers
+    parser.add_argument(
+        "--retry-frequency",
+        type=int,
+        default=3600,
+        help="How often to retry failed transfers (in seconds). Default is 1 hour (3600 seconds).",
+    )
+
     # a parameter used to specify how far back we go to check the fees LPs have made
     parser.add_argument(
         "--fee-check-period",
@@ -100,7 +116,7 @@ def add_args(parser: argparse.ArgumentParser):
         "--db-path",
         type=str,
         default="database.db",
-        help="Path to the SQLite database file."
+        help="Path to the SQLite database file.",
     )
 
     # coldkey to track stake from and calculate rewards

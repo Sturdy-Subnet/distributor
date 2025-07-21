@@ -11,9 +11,13 @@ CREATE TABLE IF NOT EXISTS token_id_scores (
 );
 
 CREATE TABLE IF NOT EXISTS transfers (
-    id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
-    recipient TEXT NOT NULL,
+    origin_coldkey TEXT NOT NULL,
+    destination_coldkey TEXT NOT NULL,
+    destination_h160 TEXT NOT NULL,
+    origin_hotkey TEXT NOT NULL,
+    destination_hotkey TEXT NOT NULL,
     amount REAL DEFAULT 0.0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

@@ -1,4 +1,3 @@
-
 # Constants for time calculations
 SECONDS_PER_HOUR = 3600  # 60 minutes * 60 seconds
 SECONDS_PER_BT_BLOCK = 12  # 12 seconds per block
