@@ -7,3 +7,30 @@ NETUID = 10  # netuid
 MIN_REWARD_THRESHOLD = (
     1e-4  # minimum reward for an LP position to be considered for distribution
 )
+
+# New constants for distributor
+CHECK_INTERVAL_SECONDS = 300  # 5 minutes in seconds
+SCORE_CHECK_INTERVAL_SECONDS = 60  # Check blockchain state every minute
+PENDING_TRANSFER_WAIT_SECONDS = 300  # Check every 300 seconds when not in check window
+MIN_QUEUE_DISTRIBUTION_GAP = 3600  # At least 1 hour gap between queuing distributions
+MIN_LOOKBACK_SECONDS = 3600  # At least 1 hour lookback for distributions
+DEFAULT_LOOKBACK_SECONDS = 86400  # Default 24 hours lookback
+WAIT_PERCENTAGE = 0.9  # Wait 90% of the time before next check
+FREQUENCY_PERCENTAGE_SCORE = 0.1  # Wait 10% of frequency for score recording
+FREQUENCY_PERCENTAGE_DISTRIBUTION = 0.25  # Wait 25% of frequency for distribution
+MIN_SCORE_RECORDS = 1  # Minimum score records required for distribution
+
+# Default argument values
+DEFAULT_DISTRIBUTION_FREQUENCY = 86400  # 1 day in seconds
+DEFAULT_RECORD_SCORES_FREQUENCY = 4320  # 1.2 hours or 360 blocks in seconds
+DEFAULT_PENDING_FREQUENCY = 3600  # 1 hour in seconds
+DEFAULT_RETRY_FREQUENCY = 3600  # 1 hour in seconds
+DEFAULT_FEE_CHECK_PERIOD = 86400  # 1 day in seconds
+DEFAULT_SCHEDULE_MINUTE = 0  # Default minute for scheduled distribution
+DEFAULT_SCHEDULE_SECOND = 0  # Default second for scheduled distribution
+DEFAULT_DB_PATH = "database.db"  # Default database file path
+DEFAULT_LOG_DIR = "./logs"  # Default log directory
+DEFAULT_LOG_LEVEL = "INFO"  # Default log level
+DEFAULT_LOG_ROTATION = "1 day"  # Default log rotation period
+DEFAULT_LOG_RETENTION = "30 days"  # Default log retention period
+DEFAULT_TIMEZONE = "UTC"  # Default timezone for scheduling

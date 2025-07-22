@@ -1,4 +1,19 @@
 import argparse
+from constants import (
+    DEFAULT_DISTRIBUTION_FREQUENCY,
+    DEFAULT_RECORD_SCORES_FREQUENCY,
+    DEFAULT_PENDING_FREQUENCY,
+    DEFAULT_RETRY_FREQUENCY,
+    DEFAULT_FEE_CHECK_PERIOD,
+    DEFAULT_SCHEDULE_MINUTE,
+    DEFAULT_SCHEDULE_SECOND,
+    DEFAULT_DB_PATH,
+    DEFAULT_LOG_DIR,
+    DEFAULT_LOG_LEVEL,
+    DEFAULT_LOG_ROTATION,
+    DEFAULT_LOG_RETENTION,
+    DEFAULT_TIMEZONE,
+)
 
 
 def add_args(parser: argparse.ArgumentParser):
@@ -9,14 +24,14 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--log-dir",
         type=str,
-        default="./logs",
+        default=DEFAULT_LOG_DIR,
         help="Directory to save log files. Default is './logs'.",
     )
 
     parser.add_argument(
         "--log-level",
         type=str,
-        default="INFO",
+        default=DEFAULT_LOG_LEVEL,
         choices=["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging level. Default is INFO.",
     )
@@ -24,14 +39,14 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--log-rotation",
         type=str,
-        default="1 day",
+        default=DEFAULT_LOG_ROTATION,
         help="Log file rotation (e.g., '1 day', '100 MB', '1 week'). Default is '1 day'.",
     )
 
     parser.add_argument(
         "--log-retention",
         type=str,
-        default="30 days",
+        default=DEFAULT_LOG_RETENTION,
         help="Log file retention period (e.g., '30 days', '1 week'). Default is '30 days'.",
     )
 
@@ -39,7 +54,7 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--distribution-frequency",
         type=int,
-        default=86400,
+        default=DEFAULT_DISTRIBUTION_FREQUENCY,
         help="How often to distribute rewards to LPs (in seconds). Default is 1 day (86400 seconds).",
     )
 
@@ -47,7 +62,7 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--record-scores-frequency",
         type=int,
-        default=4320,
+        default=DEFAULT_RECORD_SCORES_FREQUENCY,
         help="How often to record scores for distribution (in seconds). Default is 4320 Seconds (1.2 hours or 360 blocks).",
     )
 
@@ -55,7 +70,7 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--distribution-schedule-timezone",
         type=str,
-        default="UTC",
+        default=DEFAULT_TIMEZONE,
         help="Timezone for distribution schedule (e.g., 'UTC', 'Europe/Berlin', 'America/New_York'). Default is UTC.",
     )
 
@@ -69,14 +84,14 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--distribution-schedule-minute",
         type=int,
-        default=0,
+        default=DEFAULT_SCHEDULE_MINUTE,
         help="Minute of hour to distribute rewards (0-59). Default is 0.",
     )
 
     parser.add_argument(
         "--distribution-schedule-second",
         type=int,
-        default=0,
+        default=DEFAULT_SCHEDULE_SECOND,
         help="Second of minute to distribute rewards (0-59). Default is 0.",
     )
 
@@ -91,7 +106,7 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--pending-frequency",
         type=int,
-        default=3600,
+        default=DEFAULT_PENDING_FREQUENCY,
         help="How often to run pending transfers (in seconds). Default is 1 hour (3600 seconds).",
     )
 
@@ -99,7 +114,7 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--retry-frequency",
         type=int,
-        default=3600,
+        default=DEFAULT_RETRY_FREQUENCY,
         help="How often to retry failed transfers (in seconds). Default is 1 hour (3600 seconds).",
     )
 
@@ -107,7 +122,7 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--fee-check-period",
         type=int,
-        default=86400,
+        default=DEFAULT_FEE_CHECK_PERIOD,
         help="How far back to check fees (in seconds). Default is 1 day (86400 seconds).",
     )
 
@@ -115,7 +130,7 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--db-path",
         type=str,
-        default="database.db",
+        default=DEFAULT_DB_PATH,
         help="Path to the SQLite database file.",
     )
 

@@ -14,7 +14,21 @@ import os
 import dotenv
 from web3 import AsyncWeb3
 from args import add_args
-from constants import NETUID, SECONDS_PER_BT_BLOCK, MIN_REWARD_THRESHOLD
+from constants import (
+    NETUID,
+    SECONDS_PER_BT_BLOCK,
+    MIN_REWARD_THRESHOLD,
+    CHECK_INTERVAL_SECONDS,
+    SCORE_CHECK_INTERVAL_SECONDS,
+    PENDING_TRANSFER_WAIT_SECONDS,
+    MIN_QUEUE_DISTRIBUTION_GAP,
+    MIN_LOOKBACK_SECONDS,
+    DEFAULT_LOOKBACK_SECONDS,
+    WAIT_PERCENTAGE,
+    FREQUENCY_PERCENTAGE_SCORE,
+    FREQUENCY_PERCENTAGE_DISTRIBUTION,
+    MIN_SCORE_RECORDS,
+)
 from addr import h160_to_ss58
 
 # Load environment variables from .env file
@@ -171,8 +185,9 @@ async def should_queue_distribution(
             # Check if enough time has passed since last distribution
             if (
                 current_time >= next_queue_time
-                and (current_time - last_queued).total_seconds() >= 3600
-            ):  # At least 1 hour gap
+                and (current_time - last_queued).total_seconds()
+                >= MIN_QUEUE_DISTRIBUTION_GAP
+            ):
                 logger.debug(
                     f"Should queue distribution: current_time={current_time}, last_queued={last_queued}, next_queue_time={next_queue_time}"
                 )
@@ -184,7 +199,9 @@ async def should_queue_distribution(
                 return False, next_queue_time
         else:
             # Frequency-based scheduling
-            frequency_secs = distribution_schedule.get("frequency_secs", 86400)
+            frequency_secs = distribution_schedule.get(
+                "frequency_secs", DEFAULT_LOOKBACK_SECONDS
+            )
             next_queue_time = last_queued + timedelta(seconds=frequency_secs)
 
             if current_time >= next_queue_time:
@@ -250,7 +267,7 @@ def calculate_next_scheduled_time(
 
 
 async def check_sufficient_scores_for_distribution(
-    db_path: str, start_block: int, min_score_records: int = 1
+    db_path: str, start_block: int, min_score_records: int = MIN_SCORE_RECORDS
 ) -> tuple[bool, int]:
     """
     Check if we have sufficient score records to perform a meaningful distribution.
@@ -398,7 +415,7 @@ async def run_intelligent_score_recording(
         return
 
     last_check_time = 0
-    check_interval = 60  # Check every minute instead of every second
+    check_interval = SCORE_CHECK_INTERVAL_SECONDS
 
     while True:
         try:
@@ -417,14 +434,18 @@ async def run_intelligent_score_recording(
                     # After recording, wait at least the minimum interval before checking again
                     last_check_time = current_time
                     await asyncio.sleep(
-                        max(60, frequency_secs // 10)
-                    )  # Wait 10% of frequency or 1 min
+                        max(
+                            SCORE_CHECK_INTERVAL_SECONDS,
+                            frequency_secs * FREQUENCY_PERCENTAGE_SCORE,
+                        )
+                    )
                 elif next_record_block:
                     # Calculate how long to wait based on blocks remaining
                     blocks_remaining = next_record_block - current_block
                     wait_seconds = max(
-                        60, blocks_remaining * SECONDS_PER_BT_BLOCK * 0.9
-                    )  # Wait 90% of the time
+                        SCORE_CHECK_INTERVAL_SECONDS,
+                        blocks_remaining * SECONDS_PER_BT_BLOCK * WAIT_PERCENTAGE,
+                    )
                     logger.debug(
                         f"Next score recording in ~{blocks_remaining} blocks ({wait_seconds:.0f}s)"
                     )
@@ -471,7 +492,7 @@ async def run_intelligent_distribution_queueing(
 
     coldkey = wallet.coldkeypub.ss58_address
     last_check_time = 0
-    check_interval = 300  # Check every 5 minutes for distributions
+    check_interval = CHECK_INTERVAL_SECONDS
 
     while True:
         try:
@@ -498,7 +519,7 @@ async def run_intelligent_distribution_queueing(
                         )
                     else:
                         seconds_to_look_back = distribution_schedule.get(
-                            "frequency_secs", 86400
+                            "frequency_secs", DEFAULT_LOOKBACK_SECONDS
                         )
 
                     blocks_to_lookback = (
@@ -510,7 +531,7 @@ async def run_intelligent_distribution_queueing(
                         sufficient_scores,
                         record_count,
                     ) = await check_sufficient_scores_for_distribution(
-                        db_path, start_block, min_score_records=1
+                        db_path, start_block, min_score_records=MIN_SCORE_RECORDS
                     )
 
                     if sufficient_scores:
@@ -521,8 +542,11 @@ async def run_intelligent_distribution_queueing(
                         # After queueing, wait before checking again
                         last_check_time = current_time_ts
                         await asyncio.sleep(
-                            max(300, frequency_secs // 4)
-                        )  # Wait 25% of frequency or 5 min
+                            max(
+                                CHECK_INTERVAL_SECONDS,
+                                frequency_secs * FREQUENCY_PERCENTAGE_DISTRIBUTION,
+                            )
+                        )
                     else:
                         logger.info(
                             f"Insufficient score data for distribution ({record_count} records since block {start_block})"
@@ -534,8 +558,8 @@ async def run_intelligent_distribution_queueing(
                     # Calculate how long to wait until next distribution
                     wait_seconds = (next_queue_time - current_time).total_seconds()
                     wait_seconds = max(
-                        300, wait_seconds * 0.9
-                    )  # Wait 90% of the time or 5 min
+                        CHECK_INTERVAL_SECONDS, wait_seconds * WAIT_PERCENTAGE
+                    )
                     logger.debug(
                         f"Next distribution queue at {next_queue_time} ({wait_seconds:.0f}s)"
                     )
@@ -545,9 +569,7 @@ async def run_intelligent_distribution_queueing(
                     last_check_time = current_time_ts
                     await asyncio.sleep(check_interval)
             else:
-                await asyncio.sleep(
-                    30
-                )  # Check every 30 seconds when not in check window
+                await asyncio.sleep(PENDING_TRANSFER_WAIT_SECONDS)
 
         except Exception as e:
             logger.error(f"Error in intelligent distribution queueing: {e}")
@@ -588,14 +610,14 @@ def calculate_lookback_seconds(
                     last_scheduled -= timedelta(days=1)
 
             lookback_seconds = (current_time - last_scheduled).total_seconds()
-            return max(3600, int(lookback_seconds))  # At least 1 hour
+            return max(MIN_LOOKBACK_SECONDS, int(lookback_seconds))
         else:
             # For frequency-based scheduling
-            return distribution_schedule.get("frequency_secs", 86400)
+            return distribution_schedule.get("frequency_secs", DEFAULT_LOOKBACK_SECONDS)
 
     except Exception as e:
         logger.error(f"Error calculating lookback seconds: {e}")
-        return 86400  # Default to 24 hours
+        return DEFAULT_LOOKBACK_SECONDS
 
 
 async def record_scores_for_distribution(
@@ -879,7 +901,9 @@ async def queue_distribution(
                 return
         else:
             # If hour is not specified, use the frequency_secs to determine how far back to look
-            seconds_to_look_back = distribution_schedule.get("frequency_secs", 86400)
+            seconds_to_look_back = distribution_schedule.get(
+                "frequency_secs", DEFAULT_LOOKBACK_SECONDS
+            )
 
         blocks_to_lookback = int(seconds_to_look_back) // SECONDS_PER_BT_BLOCK
         current_block = await pos_chain_subtensor.get_current_block()
