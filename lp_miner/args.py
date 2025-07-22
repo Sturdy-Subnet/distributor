@@ -78,21 +78,21 @@ def add_args(parser: argparse.ArgumentParser):
         "--distribution-schedule-hour",
         type=int,
         default=None,
-        help="Hour of day to distribute rewards (0-23). If not specified, uses frequency-based scheduling.",
+        help="Hour(s) to distribute rewards (0-23). Run every hour if not specified.",
     )
 
     parser.add_argument(
         "--distribution-schedule-minute",
         type=int,
-        default=DEFAULT_SCHEDULE_MINUTE,
-        help="Minute of hour to distribute rewards (0-59). Default is 0.",
+        default=None,
+        help="Minute(s) to distribute rewards (0-59). Run every specified minute of matching hours.",
     )
 
     parser.add_argument(
         "--distribution-schedule-second",
         type=int,
-        default=DEFAULT_SCHEDULE_SECOND,
-        help="Second of minute to distribute rewards (0-59). Default is 0.",
+        default=None,
+        help="Second(s) to distribute rewards (0-59). Run every specified second of matching minutes.",
     )
 
     parser.add_argument(

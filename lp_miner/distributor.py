@@ -43,12 +43,20 @@ def time_matches(
     days: Optional[List[int]] = None,
 ) -> bool:
     """Check if current time matches the schedule"""
-    return (
-        (second is None or now.second == second)
-        and (minute is None or now.minute == minute)
-        and (hour is None or now.hour == hour)
-        and (days is None or now.weekday() in days)
-    )
+    # If a component is None, it means "match any value"
+    # If a component has a value, it must match exactly
+    matches = True
+
+    if second is not None:
+        matches = matches and now.second == second
+    if minute is not None:
+        matches = matches and now.minute == minute
+    if hour is not None:
+        matches = matches and now.hour == hour
+    if days is not None:
+        matches = matches and now.weekday() in days
+
+    return matches
 
 
 def setup_logging(log_dir: str, log_level: str, log_rotation: str, log_retention: str):
@@ -228,8 +236,8 @@ def calculate_next_scheduled_time(
     """Calculate the next scheduled distribution time based on the schedule."""
     try:
         timezone = ZoneInfo(distribution_schedule.get("timezone", "UTC"))
-        hour = distribution_schedule.get("hour", 0)
-        minute = distribution_schedule.get("minute", 0)
+        hour = distribution_schedule.get("hour")
+        minute = distribution_schedule.get("minute")
         second = distribution_schedule.get("second", 0)
         days = distribution_schedule.get("days")
 
@@ -239,31 +247,46 @@ def calculate_next_scheduled_time(
         else:
             current_time = current_time.astimezone(timezone)
 
-        # Start with today at the scheduled time
-        next_time = current_time.replace(
-            hour=hour,
-            minute=minute,
-            second=second,
-            microsecond=0,
-        )
+        # Start with the current time
+        next_time = current_time.replace(microsecond=0)
 
-        # If the time has already passed today, move to tomorrow
-        if next_time <= current_time:
-            next_time += timedelta(days=1)
+        # Add one second to start from the next possible time
+        next_time += timedelta(seconds=1)
 
-        # If specific days are configured, find the next valid day
+        # Adjust components that are specified in the schedule
+        if second is not None:
+            if next_time.second > second:
+                next_time += timedelta(minutes=1)
+            next_time = next_time.replace(second=second)
+
+        if minute is not None:
+            if next_time.minute > minute:
+                next_time += timedelta(hours=1)
+            next_time = next_time.replace(minute=minute)
+
+        if hour is not None:
+            if next_time.hour > hour:
+                next_time += timedelta(days=1)
+            next_time = next_time.replace(hour=hour)
+
+        # If specific days are configured, move to the next valid day
         if days is not None:
             while next_time.weekday() not in days:
                 next_time += timedelta(days=1)
+                # Reset time components when moving to a new day
+                if hour is not None:
+                    next_time = next_time.replace(hour=hour)
+                if minute is not None:
+                    next_time = next_time.replace(minute=minute)
+                if second is not None:
+                    next_time = next_time.replace(second=second)
 
         return next_time
 
     except Exception as e:
         logger.error(f"Error calculating next scheduled time: {e}")
-        # Default to 24 hours from now, ensuring timezone consistency
-        if current_time.tzinfo is None:
-            current_time = current_time.replace(tzinfo=ZoneInfo("UTC"))
-        return current_time + timedelta(days=1)
+        # Default to 1 minute from now
+        return current_time + timedelta(minutes=1)
 
 
 async def check_sufficient_scores_for_distribution(
@@ -311,62 +334,41 @@ async def run_on_schedule(
 ):
     """
     Run the task either at the specified frequency in seconds or at specific scheduled times.
-
-    If hour is specified, uses time-based scheduling, otherwise uses frequency-based scheduling.
-
-    - task_args: tuple of positional arguments to pass to the task
-    - task_kwargs: dict of keyword arguments to pass to the task
-    - frequency_secs: how often to run the task in seconds (used when hour is None)
-    - timezone: timezone for time-based scheduling (e.g., 'UTC', 'Europe/Berlin')
-    - hour: hour of day to run the task (0-23, enables time-based scheduling)
-    - minute: minute of hour to run the task (0-59, default 0)
-    - second: second of minute to run the task (0-59, default 0)
-    - days: list of weekdays to run on (0=Monday, 6=Sunday, None=every day)
+    Uses time-based scheduling if any time component (hour/minute/second/days) is specified.
     """
     if task_kwargs is None:
         task_kwargs = {}
 
-    # Time-based scheduling
-    if hour is not None:
+    # Time-based scheduling if any time component is specified
+    if any(x is not None for x in [hour, minute, second, days]):
         last_run_date = None
+        # Fix: Handle None values in logging
+        hour_str = "*" if hour is None else str(hour).zfill(2)
+        minute_str = "*" if minute is None else str(minute).zfill(2)
+        second_str = "*" if second is None else str(second).zfill(2)
+
         logger.info(
-            f"Starting time-based scheduling for {task.__name__} at {hour:02d}:{minute:02d}:{second:02d} {timezone}"
+            f"Starting time-based scheduling for {task.__name__} at "
+            f"hour={hour_str}, minute={minute_str}, second={second_str} {timezone}"
         )
 
         while True:
-            try:
-                # Get current time in the specified timezone
-                tz = ZoneInfo(timezone)
-                now = datetime.now(tz)
+            now = datetime.now(ZoneInfo(timezone))
 
-                # Check if current time matches the schedule
-                if time_matches(now, second, minute, hour, days):
-                    # Ensure we only run once per matching time period
-                    current_date = now.date()
-                    if last_run_date != current_date or (
-                        days is not None and now.weekday() not in days
-                    ):
-                        if days is None or now.weekday() in days:
-                            logger.info(
-                                f"Running scheduled task {task.__name__} at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
-                            )
-                            asyncio.create_task(task(*task_args, **task_kwargs))
-                            last_run_date = current_date
+            if time_matches(now, second, minute, hour, days):
+                if last_run_date is None or (now - last_run_date).total_seconds() >= 1:
+                    logger.debug(f"Running scheduled task {task.__name__}")
+                    await task(*task_args, **task_kwargs)
+                    last_run_date = now
 
-                await asyncio.sleep(1)  # Check every second
+            # Calculate sleep time to next second
+            sleep_time = 1 - (now.microsecond / 1_000_000)
+            await asyncio.sleep(sleep_time)
 
-            except Exception as e:
-                logger.error(
-                    f"Invalid timezone '{timezone}': {e}. Falling back to UTC."
-                )
-                timezone = "UTC"
-
-    # Frequency-based scheduling (legacy behavior)
+    # Frequency-based scheduling
     else:
         if frequency_secs is None:
-            raise ValueError(
-                "Either frequency_secs must be specified or hour must be provided for time-based scheduling"
-            )
+            raise ValueError("Must specify either time components or frequency_secs")
 
         logger.info(
             f"Starting frequency-based scheduling for {task.__name__} every {frequency_secs} seconds"
@@ -382,17 +384,10 @@ async def run_on_schedule(
                 task, task_args, task_kwargs, frequency_secs
             )
         else:
-            # Regular frequency-based scheduling for other tasks
-            last_run_time = 0
             while True:
-                current_time = datetime.now().timestamp()
-
-                if current_time - last_run_time >= frequency_secs:
-                    logger.debug(f"Running scheduled task {task.__name__}")
-                    asyncio.create_task(task(*task_args, **task_kwargs))
-                    last_run_time = current_time
-
-                await asyncio.sleep(1)  # Check every second
+                logger.debug(f"Running scheduled task {task.__name__}")
+                await task(*task_args, **task_kwargs)
+                await asyncio.sleep(frequency_secs)
 
 
 async def run_intelligent_score_recording(
@@ -581,36 +576,28 @@ def calculate_lookback_seconds(
 ) -> int:
     """Calculate how many seconds to look back based on distribution schedule."""
     try:
-        if distribution_schedule.get("hour") is not None:
-            # For time-based scheduling, calculate time since last scheduled run
-            hour = distribution_schedule.get("hour", 0)
-            minute = distribution_schedule.get("minute", 0)
-            second = distribution_schedule.get("second", 0)
-            days = distribution_schedule.get("days")
+        if any(
+            distribution_schedule.get(k) is not None
+            for k in ["hour", "minute", "second", "days"]
+        ):
+            # For time-based scheduling, calculate the appropriate lookback period
+            lookback = timedelta(hours=1)  # Default to 1 hour
 
-            # Ensure current_time has timezone info
-            timezone = ZoneInfo(distribution_schedule.get("timezone", "UTC"))
-            if current_time.tzinfo is None:
-                current_time = current_time.replace(tzinfo=timezone)
-            else:
-                current_time = current_time.astimezone(timezone)
+            if distribution_schedule.get("hour") is not None:
+                lookback = timedelta(days=1)  # If hours specified, look back one day
+            elif distribution_schedule.get("minute") is not None:
+                lookback = timedelta(
+                    hours=1
+                )  # If minutes specified, look back one hour
+            elif distribution_schedule.get("second") is not None:
+                lookback = timedelta(
+                    minutes=1
+                )  # If seconds specified, look back one minute
 
-            # Find the most recent scheduled time
-            last_scheduled = current_time.replace(
-                hour=hour, minute=minute, second=second, microsecond=0
-            )
+            if distribution_schedule.get("days") is not None:
+                lookback = timedelta(weeks=1)  # If days specified, look back one week
 
-            # If we haven't reached today's scheduled time, go back to yesterday
-            if last_scheduled > current_time:
-                last_scheduled -= timedelta(days=1)
-
-            # If specific days are configured, find the most recent valid day
-            if days is not None:
-                while last_scheduled.weekday() not in days:
-                    last_scheduled -= timedelta(days=1)
-
-            lookback_seconds = (current_time - last_scheduled).total_seconds()
-            return max(MIN_LOOKBACK_SECONDS, int(lookback_seconds))
+            return max(MIN_LOOKBACK_SECONDS, int(lookback.total_seconds()))
         else:
             # For frequency-based scheduling
             return distribution_schedule.get("frequency_secs", DEFAULT_LOOKBACK_SECONDS)
@@ -875,41 +862,22 @@ async def queue_distribution(
     try:
         logger.info("Starting rewards distribution queueing...")
 
-        # get the current block number
+        current_time = datetime.now(
+            ZoneInfo(distribution_schedule.get("timezone", "UTC"))
+        )
         current_block = await pos_chain_subtensor.get_current_block()
         logger.info(f"Current block number: {current_block}")
-        # get the block from which we will start distributing rewards
-        # we will claculate the amount of seconds to look back based on the distribution schedule
-        if distribution_schedule["hour"] is not None:
-            # If hour is specified, calculate the time to look back based on the schedule
-            now = datetime.now(ZoneInfo(distribution_schedule["timezone"]))
-            distribution_time = datetime(
-                now.year,
-                now.month,
-                now.day,
-                distribution_schedule["hour"],
-                distribution_schedule["minute"],
-                distribution_schedule["second"],
-                tzinfo=ZoneInfo(distribution_schedule["timezone"]),
-            )
-            # Calculate how many seconds to look back
-            seconds_to_look_back = (now - distribution_time).total_seconds()
-            if seconds_to_look_back < 0:
-                logger.info(
-                    "Current time is before the scheduled distribution time, skipping distribution."
-                )
-                return
-        else:
-            # If hour is not specified, use the frequency_secs to determine how far back to look
-            seconds_to_look_back = distribution_schedule.get(
-                "frequency_secs", DEFAULT_LOOKBACK_SECONDS
-            )
 
-        blocks_to_lookback = int(seconds_to_look_back) // SECONDS_PER_BT_BLOCK
-        current_block = await pos_chain_subtensor.get_current_block()
+        # Calculate the lookback period based on the scheduling configuration
+        lookback_seconds = calculate_lookback_seconds(
+            current_time, distribution_schedule
+        )
+        blocks_to_lookback = int(lookback_seconds) // SECONDS_PER_BT_BLOCK
         start_block = max(1, current_block - blocks_to_lookback)
+
         logger.info(
-            f"Calculating rewards distribution starting from block {start_block} (looking back {seconds_to_look_back} seconds)"
+            f"Calculating rewards distribution starting from block {start_block} "
+            f"(looking back {lookback_seconds} seconds / {blocks_to_lookback} blocks)"
         )
 
         # Calculate the reward distribution
@@ -1206,85 +1174,65 @@ if __name__ == "__main__":
 
     # Create async tasks for both functions
     async def main():
-        try:
-            logger.info("Starting main async tasks")
+        distribution_schedule = {
+            "hour": args.distribution_schedule_hour,
+            "minute": args.distribution_schedule_minute,
+            "second": args.distribution_schedule_second,
+            "timezone": args.distribution_schedule_timezone,
+            "days": distribution_days,
+            "frequency_secs": args.distribution_frequency,
+        }
 
-            # Create tasks for both functions to run concurrently
-            record_scores_task = asyncio.create_task(
-                run_on_schedule(
-                    task=record_scores_for_distribution,
-                    task_kwargs={
-                        "db_path": args.db_path,
-                        "subtensor": pos_chain_subtensor,
-                        "coldkey": coldkey,
-                        "hotkey": hotkey,
-                        "web3_provider": w3,
-                        "fee_check_period": args.fee_check_period,
-                        "frequency_secs": args.record_scores_frequency,
-                    },
-                    frequency_secs=args.record_scores_frequency,
-                )
-            )
+        tasks = [
+            # Record scores task
+            run_on_schedule(
+                record_scores_for_distribution,
+                task_kwargs={
+                    "db_path": args.db_path,
+                    "subtensor": pos_chain_subtensor,
+                    "coldkey": coldkey,
+                    "hotkey": hotkey,
+                    "web3_provider": w3,
+                    "fee_check_period": args.fee_check_period,
+                    "frequency_secs": args.record_scores_frequency,
+                },
+                frequency_secs=args.record_scores_frequency,
+            ),
+            # Queue distribution task
+            run_on_schedule(
+                queue_distribution,
+                task_kwargs={
+                    "distribution_subtensor": distribution_subtensor,
+                    "pos_chain_subtensor": pos_chain_subtensor,
+                    "wallet": distribution_wallet,
+                    "origin_hotkey": origin_hotkey,
+                    "destination_hotkey": destination_hotkey,
+                    "distribution_schedule": distribution_schedule,
+                    "db_path": args.db_path,
+                },
+                frequency_secs=args.distribution_frequency,
+                timezone=args.distribution_schedule_timezone,
+                hour=args.distribution_schedule_hour,
+                minute=args.distribution_schedule_minute,
+                second=args.distribution_schedule_second,
+                days=distribution_days,
+            ),
+            # Run pending transfers task
+            run_on_schedule(
+                run_pending_transfers,
+                task_kwargs={"db_path": args.db_path, "wallet": distribution_wallet},
+                frequency_secs=args.pending_frequency,
+            ),
+            # Retry failed transfers task
+            run_on_schedule(
+                retry_failed_transfers,
+                task_kwargs={"db_path": args.db_path, "wallet": distribution_wallet},
+                frequency_secs=args.retry_frequency,
+            ),
+        ]
 
-            queue_distribution_task = asyncio.create_task(
-                run_on_schedule(
-                    task=queue_distribution,
-                    task_kwargs={
-                        "distribution_subtensor": distribution_subtensor,
-                        "pos_chain_subtensor": pos_chain_subtensor,
-                        "wallet": distribution_wallet,
-                        "origin_hotkey": origin_hotkey,
-                        "destination_hotkey": destination_hotkey,
-                        "db_path": args.db_path,
-                        "distribution_schedule": distribution_schedule,
-                    },
-                    # TODO: use distribution_schedule to determine how often to run this task instead
-                    frequency_secs=args.distribution_frequency
-                    if args.distribution_schedule_hour is None
-                    else None,
-                    timezone=args.distribution_schedule_timezone,
-                    hour=args.distribution_schedule_hour,
-                    minute=args.distribution_schedule_minute,
-                    second=args.distribution_schedule_second,
-                    days=distribution_days,
-                )
-            )
-
-            # Task to periodically run pending transfers
-            pending_transfers_task = asyncio.create_task(
-                run_on_schedule(
-                    task=run_pending_transfers,
-                    task_kwargs={
-                        "db_path": args.db_path,
-                        "wallet": distribution_wallet,
-                    },
-                    frequency_secs=args.pending_frequency,
-                )
-            )
-
-            # Task to periodically retry failed transfers
-            retry_failed_transfers_task = asyncio.create_task(
-                run_on_schedule(
-                    task=retry_failed_transfers,
-                    task_kwargs={
-                        "db_path": args.db_path,
-                        "wallet": distribution_wallet,
-                    },
-                    frequency_secs=args.retry_frequency,
-                )
-            )
-
-            # Wait for both tasks to complete (they run indefinitely)
-            await asyncio.gather(
-                record_scores_task,
-                queue_distribution_task,
-                pending_transfers_task,
-                retry_failed_transfers_task,
-            )
-
-        except Exception as e:
-            logger.error(f"Error in main async function: {e}")
-            raise
+        logger.info("Starting main async tasks")
+        await asyncio.gather(*tasks)
 
     # Print scheduling information
     frequency_info = f"Running record_scores_for_distribution every {args.record_scores_frequency} seconds..."
@@ -1292,7 +1240,7 @@ if __name__ == "__main__":
 
     if args.distribution_schedule_hour is not None:
         days_str = f" on days {distribution_days}" if distribution_days else " daily"
-        schedule_info = f"Distribution scheduled for {args.distribution_schedule_hour:02d}:{args.distribution_schedule_minute:02d}:{args.distribution_schedule_second:02d} {args.distribution_schedule_timezone}{days_str}"
+        schedule_info = f"queue_distribution scheduled for {args.distribution_schedule_hour}:{args.distribution_schedule_minute}:{args.distribution_schedule_second} {args.distribution_schedule_timezone}{days_str}"
         logger.info(schedule_info)
     else:
         frequency_info = (
