@@ -15,4 +15,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-sturdy-subnet = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet", rev = "4.0.7" }
+sturdy-subnet = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet", rev = "release/4.0.10" }

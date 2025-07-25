@@ -1,6 +1,8 @@
 -- migrate:up
 
 CREATE TABLE IF NOT EXISTS token_id_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    used BOOLEAN NOT NULL DEFAULT 0,
     block_start INTEGER NOT NULL,
     block_start_stake INTEGER NOT NULL,
     block_end INTEGER NOT NULL,

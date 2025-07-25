@@ -1,5 +1,7 @@
 CREATE TABLE IF NOT EXISTS "schema_migrations" (version varchar(128) primary key);
 CREATE TABLE token_id_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    used BOOLEAN NOT NULL DEFAULT 0,
     block_start INTEGER NOT NULL,
     block_start_stake INTEGER NOT NULL,
     block_end INTEGER NOT NULL,

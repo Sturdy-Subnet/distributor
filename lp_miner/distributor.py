@@ -303,7 +303,7 @@ async def check_sufficient_scores_for_distribution(
     try:
         async with aiosqlite.connect(db_path) as db:
             async with db.execute(
-                "SELECT COUNT(*) FROM token_id_scores WHERE block_start_stake >= ?",
+                "SELECT COUNT(*) FROM token_id_scores WHERE block_start_stake >= ? AND used = 0",
                 (start_block,),
             ) as cursor:
                 result = await cursor.fetchone()
@@ -738,7 +738,7 @@ async def record_scores_for_distribution(
 
 async def calculate_reward_distribution(
     db_path: str, start_block: int
-) -> dict[str, bt.Balance]:
+) -> tuple[dict[str, bt.Balance], list[int]]:
     """
     Calculate distribution information from the database.
     This is done by adding up the delta scores and the scores for the owners of the token ids
@@ -747,20 +747,23 @@ async def calculate_reward_distribution(
     try:
         async with aiosqlite.connect(db_path) as db:
             async with db.execute(
-                "SELECT block_start_stake, delta_stake, growth_info, scores FROM token_id_scores WHERE block_start_stake >= ?",
+                "SELECT id, block_start_stake, delta_stake, growth_info, scores FROM token_id_scores WHERE block_start_stake >= ? AND used = 0",
                 (start_block,),
             ) as cursor:
                 rows = await cursor.fetchall()
 
         if not rows:
             logger.warning("No records found in the database.")
-            return []
+            return {}, []
+
+        ids = []
 
         # Calculate total delta stake, ensuring no overlapping entries
         # Group by block_start_stake to avoid double-counting overlapping periods
         stake_periods = {}
         for row in rows:
             (
+                id,
                 block_start_stake,
                 delta_stake,
                 growth_info,
@@ -774,6 +777,7 @@ async def calculate_reward_distribution(
                 stake_periods[block_start_stake] = max(
                     stake_periods[block_start_stake], delta_stake
                 )
+            ids.append(int(id))
 
         # Sum up the non-overlapping delta stakes
         total_delta_stake = sum(stake_periods.values())
@@ -781,13 +785,13 @@ async def calculate_reward_distribution(
             logger.warning(
                 "Total ∆ stake has not increased, cannot calculate distribution."
             )
-            return {}
+            return {}, []
 
         # owner -> reward
         score_distribution = {}
 
         for row in rows:
-            _, delta_stake, growth_info, scores = row
+            _, _, delta_stake, growth_info, scores = row
             scores = json.loads(scores)
             growth_info = json.loads(growth_info)
 
@@ -804,7 +808,7 @@ async def calculate_reward_distribution(
             return {
                 owner: bt.Balance.from_tao(0.0, netuid=NETUID)
                 for owner in score_distribution
-            }
+            }, ids
 
         normalized_distribution = {
             owner: score / max_score for owner, score in score_distribution.items()
@@ -839,7 +843,7 @@ async def calculate_reward_distribution(
             for owner, reward in reward_distribution.items()
         }
 
-        return reward_distribution
+        return reward_distribution, ids
 
     except Exception as e:
         logger.error(f"Error calculating reward distribution: {e}")
@@ -881,7 +885,18 @@ async def queue_distribution(
         )
 
         # Calculate the reward distribution
-        reward_distribution = await calculate_reward_distribution(db_path, start_block)
+        reward_distribution, ids_to_update = await calculate_reward_distribution(
+            db_path, start_block
+        )
+
+        # update the status of the token_id_scores in the database
+        async with aiosqlite.connect(db_path) as db:
+            for token_id in ids_to_update:
+                await db.execute(
+                    "UPDATE token_id_scores SET used = 1 WHERE id = ?",
+                    (token_id,),
+                )
+            await db.commit()
 
         if not reward_distribution:
             logger.info("No rewards to distribute, skipping distribution.")
