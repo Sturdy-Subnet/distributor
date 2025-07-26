@@ -5,12 +5,13 @@ from datetime import datetime, timedelta
 import json
 import bittensor as bt
 from typing import Callable, Optional, List
-from sturdy.utils.taofi_subgraph import calculate_fee_growth
+from sturdy.utils.taofi_subgraph import get_fees_in_range
 import aiosqlite
 from zoneinfo import ZoneInfo
 from loguru import logger
 import sys
 import os
+import httpx
 import dotenv
 from web3 import AsyncWeb3
 from args import add_args
@@ -454,6 +455,7 @@ async def run_intelligent_score_recording(
 
         except Exception as e:
             logger.error(f"Error in intelligent score recording: {e}")
+            logger.exception(e)
             await asyncio.sleep(check_interval)
 
 
@@ -607,6 +609,54 @@ def calculate_lookback_seconds(
         return DEFAULT_LOOKBACK_SECONDS
 
 
+async def get_fees(
+    web3_provider: AsyncWeb3,
+    block_start: int,
+    block_end: int,
+    blacklist_endpoint: str | None = None,
+) -> dict:
+    # Get the fee growth for each LP position
+    fees_in_range, _ = await get_fees_in_range(
+        web3_provider=web3_provider, block_start=block_start, block_end=block_end
+    )
+
+    # get list of blacklisted token ids from the blacklist endpoint with a http client, and remove them from fees_in_range
+    try:
+        if blacklist_endpoint:
+            async with httpx.AsyncClient() as client:
+                headers = {}
+                if api_key := os.getenv("API_KEY"):
+                    headers["Authorization"] = f"Bearer {api_key}"
+                try:
+                    response = await client.get(blacklist_endpoint, headers=headers)
+                    response.raise_for_status()
+                    blacklist = response.json().get("claimed_token_ids", [])
+                    blacklist_set = set(blacklist)
+                except httpx.RequestError as e:
+                    logger.error(f"Error fetching blacklist: {e}")
+                    blacklist_set = set()
+        else:
+            blacklist_set = set()
+
+        # log blacklist information
+        if blacklist_set:
+            logger.info(
+                f"Using blacklist from {blacklist_endpoint} with {len(blacklist_set)} entries"
+            )
+            logger.debug(f"Blacklist entries: {blacklist_set}")
+
+        # Return fees_in_range filtered by blacklist
+        return {
+            token_id: fees
+            for token_id, fees in fees_in_range.items()
+            if token_id not in blacklist_set
+        }
+    except Exception as e:
+        logger.error("Error obtaining blacklist:")
+        logger.exception(e)
+        return fees_in_range  # Return unfiltered fees if blacklist fetch fails
+
+
 async def record_scores_for_distribution(
     db_path: str,
     subtensor: bt.AsyncSubtensor,
@@ -615,6 +665,7 @@ async def record_scores_for_distribution(
     web3_provider: AsyncWeb3,
     fee_check_period: int,
     frequency_secs: int,
+    blacklist_endpoint: str | None = None,
 ) -> None:
     try:
         block_end = await subtensor.get_current_block()
@@ -663,35 +714,24 @@ async def record_scores_for_distribution(
             return
 
         # Get the fee growth for each LP position
-        _, _, fee_growth_info = await calculate_fee_growth(
-            web3_provider=web3_provider, block_start=block_start, block_end=block_end
+        fees_in_range = await get_fees(
+            web3_provider=web3_provider,
+            block_start=block_start,
+            block_end=block_end,
+            blacklist_endpoint=blacklist_endpoint,
         )
 
-        logger.debug(f"Calculated fee growth for {len(fee_growth_info)} positions")
-        logger.debug(f"Fee growth info: {fee_growth_info[237]}")
-
-        # score the token ids based on their fee growth
-        # add up the total_fees_token1_equivalent in the fee_growth_info for each token_id,
-        # normalize it, and store it in a dict
-
-        # Filter out out-of-range positions before calculating total fees
-        for token_id, position in fee_growth_info.items():
-            # TODO: do this in sturdy subnet code, not here
-            if not (
-                position.tick_lower <= position.current_tick <= position.tick_upper
-            ):
-                position.total_fees_token1_equivalent = 0.0
+        logger.debug(f"Calculated fee growth for {len(fees_in_range)} positions")
 
         total_fees = sum(
-            position.total_fees_token1_equivalent
-            for position in fee_growth_info.values()
+            position.total_fees_token1_equivalent for position in fees_in_range.values()
         )
 
         normalized_scores = {
             token_id: position.total_fees_token1_equivalent / total_fees
             if total_fees > 0
             else 0.0
-            for token_id, position in fee_growth_info.items()
+            for token_id, position in fees_in_range.items()
         }
 
         # sort the scores by value in descending order
@@ -701,12 +741,11 @@ async def record_scores_for_distribution(
 
         json_scores = json.dumps(normalized_scores)
 
-        # fee_growth_info is a dict[int, PositionFees]
         # we convert this to a json-serializable format
         json_growth_info = json.dumps(
             {
                 str(token_id): dataclasses.asdict(fees)
-                for token_id, fees in fee_growth_info.items()
+                for token_id, fees in fees_in_range.items()
             }
         )
 
@@ -731,7 +770,6 @@ async def record_scores_for_distribution(
 
     except Exception as e:
         logger.error("Error recording scores for distribution:")
-        # log error with traceback
         logger.exception(e)
         raise
 
@@ -1210,6 +1248,7 @@ if __name__ == "__main__":
                     "web3_provider": w3,
                     "fee_check_period": args.fee_check_period,
                     "frequency_secs": args.record_scores_frequency,
+                    "blacklist_endpoint": os.getenv("BLACKLIST_ENDPOINT"),
                 },
                 frequency_secs=args.record_scores_frequency,
             ),

@@ -8,6 +8,7 @@ dependencies = [
     "aiosqlite>=0.21.0",
     "argparse>=1.4.0",
     "dotenv>=0.9.9",
+    "httpx>=0.28.1",
     "loguru>=0.7.0",
     "matplotlib>=3.10.3",
     "ruff>=0.12.4",
@@ -15,4 +16,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-sturdy-subnet = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet", rev = "release/4.0.10" }
+sturdy-subnet = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet", rev = "4.0.10" }
