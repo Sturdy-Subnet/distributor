@@ -692,19 +692,13 @@ async def record_scores_for_distribution(
         block_start_stake = block_end - (frequency_secs // SECONDS_PER_BT_BLOCK)
 
         # calculate delta stake for the lp miner that will be distributing rewards
-        stake_before = await subtensor.get_stake(
-            coldkey_ss58=coldkey,
-            hotkey_ss58=hotkey,
-            netuid=NETUID,
-            block=block_start_stake,
+        # TODO: set this to the correct
+        meta_before = await subtensor.get_metagraph_info(
+            netuid=NETUID, block=block_start
         )
-        stake_after = await subtensor.get_stake(
-            coldkey_ss58=coldkey,
-            hotkey_ss58=hotkey,
-            netuid=NETUID,
-            block=block_end,
-        )
-        delta_stake = (stake_after - stake_before).tao
+        subnet_hotkeys = meta_before.hotkeys
+        hotkey_uid = subnet_hotkeys.index(hotkey)
+        delta_stake = meta_before.emission[hotkey_uid].tao
 
         # log the web3 provider URL
         if web3_provider is not None:
@@ -723,15 +717,18 @@ async def record_scores_for_distribution(
 
         logger.debug(f"Calculated fee growth for {len(fees_in_range)} positions")
 
-        total_fees = sum(
-            position.total_fees_token1_equivalent for position in fees_in_range.values()
-        )
-
-        normalized_scores = {
-            token_id: position.total_fees_token1_equivalent / total_fees
-            if total_fees > 0
-            else 0.0
+        # Calculate L1 norm (sum of absolute values) of the raw scores
+        raw_scores = {
+            token_id: position.total_fees_token1_equivalent
             for token_id, position in fees_in_range.items()
+        }
+
+        l1_norm = sum(abs(score) for score in raw_scores.values())
+
+        # Normalize by L1 norm so scores sum to 1
+        normalized_scores = {
+            token_id: abs(score) / l1_norm if l1_norm > 0 else 0.0
+            for token_id, score in raw_scores.items()
         }
 
         # sort the scores by value in descending order
@@ -826,7 +823,7 @@ async def calculate_reward_distribution(
             return {}, []
 
         # owner -> reward
-        score_distribution = {}
+        reward_distribution: dict[str, bt.Balance] = {}
 
         for row in rows:
             _, _, delta_stake, growth_info, scores = row
@@ -835,38 +832,19 @@ async def calculate_reward_distribution(
 
             for token_id, score in scores.items():
                 owner = growth_info[token_id]["owner"]
-                if owner not in score_distribution:
-                    score_distribution[owner] = 0.0
-                score_distribution[owner] += score * delta_stake
-
-        # Normalize scores by max score in score_distribution
-        max_score = max(score_distribution.values())
-        if max_score == 0:
-            logger.warning("Max score is zero, cannot normalize distribution.")
-            return {
-                owner: bt.Balance.from_tao(0.0, netuid=NETUID)
-                for owner in score_distribution
-            }, ids
-
-        normalized_distribution = {
-            owner: score / max_score for owner, score in score_distribution.items()
-        }
-
-        # Normalize the distribution by total delta stake to obtain reward distribution
-        if total_delta_stake > 0:
-            reward_distribution = {
-                owner: score * total_delta_stake
-                for owner, score in normalized_distribution.items()
-            }
-        else:
-            logger.warning("Total delta stake is zero, cannot normalize distribution.")
-            reward_distribution = {owner: 0.0 for owner in normalized_distribution}
+                if owner not in reward_distribution:
+                    reward_distribution[owner] = bt.Balance.from_tao(
+                        amount=0.0, netuid=NETUID
+                    )
+                reward_distribution[owner] += bt.Balance.from_tao(
+                    amount=score * delta_stake, netuid=NETUID
+                )
 
         # Set rewards to zero if they are less than MIN_REWARD_THRESHOLD
         # This ensures that we do not distribute very small rewards
         # which could lead to high transaction costs relative to the reward amount
         reward_distribution = {
-            owner: reward if reward >= MIN_REWARD_THRESHOLD else 0.0
+            owner: reward if reward.tao >= MIN_REWARD_THRESHOLD else 0.0
             for owner, reward in reward_distribution.items()
         }
 
@@ -874,12 +852,6 @@ async def calculate_reward_distribution(
         reward_distribution = dict(
             sorted(reward_distribution.items(), key=lambda item: item[1], reverse=True)
         )
-
-        # convert amounts to Balance objects
-        reward_distribution = {
-            owner: bt.Balance.from_tao(amount=reward, netuid=NETUID)
-            for owner, reward in reward_distribution.items()
-        }
 
         return reward_distribution, ids
 
@@ -1025,7 +997,7 @@ async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
             logger.info("No pending transfers found in the database.")
             return
 
-        for row in rows:
+        async def process_single_transfer(row):
             (
                 transfer_id,
                 origin_coldkey,
@@ -1037,21 +1009,57 @@ async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
             ) = row
             amount = bt.Balance.from_tao(amount_tao, netuid=NETUID)
             try:
-                # Here we would implement the actual transfer logic
-                # For now, we just log the action
+                # TODO: implement moving stake
+                # if the destination hotkey is different from the origin hotkey, then we should move stake before transferring alpha to the destination coldkey
+                # if destination_hotkey != origin_hotkey:
+                #     logger.info(
+                #         f"Moving stake from {origin_hotkey} to {destination_hotkey} before transfers"
+                #     )
+                #     await distribution_subtensor.transfer_stake(
+                #         wallet=wallet,
+                #         destination_coldkey_ss58=destination_coldkey,
+                #         hotkey_ss58=origin_hotkey,
+                #         amount=amount,
+                #         origin_netuid=NETUID,
+                #         destination_netuid=NETUID,
+                #     )
+                # Transfer the alpha to the destination coldkey
                 logger.info(
                     f"Transferring: {origin_coldkey} --- {amount} ---> {destination_coldkey} (H160: {destination_h160})"
                 )
-                # TODO: Here we would implement the actual transfer logic
-                # For now, we just log the action with the converted address
-                # await distribution_subtensor.transfer_stake(
+                # move_success = await distribution_subtensor.move_stake(
                 #     wallet=wallet,
-                #     destination_coldkey_ss58=origin_coldkey,
-                #     hotkey_ss58=origin_hotkey,
-                #     amount=amount,
+                #     origin_hotkey=origin_hotkey,
+                #     destination_hotkey=destination_hotkey,
                 #     origin_netuid=NETUID,
                 #     destination_netuid=NETUID,
+                #     amount=amount,
                 # )
+
+                # if not move_success:
+                #     # raise an exception if the transfer failed
+                #     raise Exception(
+                #         f"Transfer failed for {origin_coldkey} to {destination_coldkey}"
+                #     )
+
+                # Transfer the stake to the destination coldkey
+                transfer_success = await distribution_subtensor.transfer_stake(
+                    wallet=wallet,
+                    destination_coldkey_ss58=origin_coldkey,
+                    hotkey_ss58=origin_hotkey,
+                    amount=amount,
+                    origin_netuid=NETUID,
+                    destination_netuid=NETUID,
+                )
+
+                if not transfer_success:
+                    # raise an exception if the transfer failed
+                    raise Exception(
+                        f"Transfer failed for {origin_coldkey} to {destination_coldkey}"
+                    )
+                logger.info(
+                    f"Successfully transferred: {origin_coldkey} --- {amount} ---> {destination_coldkey} (H160: {destination_h160})"
+                )
 
                 # Update the transfer status to completed
                 async with aiosqlite.connect(db_path) as db:
@@ -1070,6 +1078,9 @@ async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
                         (transfer_id,),
                     )
                     await db.commit()
+
+        # Process all transfers concurrently
+        await asyncio.gather(*[process_single_transfer(row) for row in rows])
 
     except Exception as e:
         logger.error("Error running transfers")
@@ -1090,7 +1101,7 @@ async def retry_failed_transfers(db_path: str, wallet: bt.Wallet):
             logger.info("No failed transfers found in the database.")
             return
 
-        for row in rows:
+        async def retry_single_transfer(row):
             (
                 transfer_id,
                 origin_coldkey,
@@ -1103,20 +1114,31 @@ async def retry_failed_transfers(db_path: str, wallet: bt.Wallet):
             try:
                 # Here we would implement the actual retry logic
                 # For now, we just log the action
+                amount_alpha = bt.Balance.from_tao(amount, netuid=NETUID)
                 logger.info(
-                    f"Retrying transfer: {origin_coldkey} --- {amount} ---> {destination_coldkey} (H160: {destination_h160})"
+                    f"Retrying transfer: {origin_coldkey} --- {amount_alpha} ---> {destination_coldkey} (H160: {destination_h160})"
                 )
 
                 # TODO: Here we would implement the actual transfer logic
                 # For now, we just log the action with the converted address
-                # await distribution_subtensor.transfer_stake(
-                #     wallet=wallet,
-                #     destination_coldkey_ss58=origin_coldkey,
-                #     hotkey_ss58=origin_hotkey,
-                #     amount=amount,
-                #     origin_netuid=NETUID,
-                #     destination_netuid=NETUID,
-                # )
+                transfer_success = await distribution_subtensor.transfer_stake(
+                    wallet=wallet,
+                    destination_coldkey_ss58=destination_coldkey,
+                    hotkey_ss58=origin_hotkey,
+                    amount=amount_alpha,
+                    origin_netuid=NETUID,
+                    destination_netuid=NETUID,
+                )
+
+                if not transfer_success:
+                    # raise an exception if the transfer failed
+                    raise Exception(
+                        f"Retry transfer failed for {origin_coldkey} to {destination_coldkey}"
+                    )
+
+                logger.info(
+                    f"Successfully retried transfer: {origin_coldkey} --- {amount_alpha} ---> {destination_coldkey} (H160: {destination_h160})"
+                )
 
                 # Update the transfer status to completed
                 async with aiosqlite.connect(db_path) as db:
@@ -1135,6 +1157,9 @@ async def retry_failed_transfers(db_path: str, wallet: bt.Wallet):
                         (transfer_id,),
                     )
                     await db.commit()
+
+        # Process all transfers concurrently
+        await asyncio.gather(*[retry_single_transfer(row) for row in rows])
 
     except Exception as e:
         logger.error("Error retrying failed distributions")
@@ -1160,6 +1185,9 @@ if __name__ == "__main__":
     conf = bt.config(parser=parser)
     # wallet to distribute rewards from on the distribution chain
     distribution_wallet = bt.wallet(config=conf)
+    # unlock the coldkey of the distribution wallet
+    distribution_wallet.unlock_coldkey()
+    distribution_wallet.unlock_hotkey()
     # coldkey and hotkey pair to track stake from and calculate rewards
     coldkey = (
         args.stake_coldkey
@@ -1227,6 +1255,9 @@ if __name__ == "__main__":
 
     # Create async tasks for both functions
     async def main():
+        # initialize the subtensors
+        await distribution_subtensor.initialize()
+        await pos_chain_subtensor.initialize()
         distribution_schedule = {
             "hour": args.distribution_schedule_hour,
             "minute": args.distribution_schedule_minute,
@@ -1292,15 +1323,16 @@ if __name__ == "__main__":
     frequency_info = f"Running record_scores_for_distribution every {args.record_scores_frequency} seconds..."
     logger.info(frequency_info)
 
-    if args.distribution_schedule_hour is not None:
-        days_str = f" on days {distribution_days}" if distribution_days else " daily"
-        schedule_info = f"queue_distribution scheduled for {args.distribution_schedule_hour}:{args.distribution_schedule_minute}:{args.distribution_schedule_second} {args.distribution_schedule_timezone}{days_str}"
-        logger.info(schedule_info)
-    else:
-        frequency_info = (
-            f"Running queue_distribution every {args.distribution_frequency} seconds..."
-        )
-        logger.info(frequency_info)
+    # TODO: update the logging for distribution scheduling
+    # if args.distribution_schedule_hour is not None:
+    #     days_str = f" on days {distribution_days}" if distribution_days else " daily"
+    #     schedule_info = f"queue_distribution scheduled for {args.distribution_schedule_hour}:{args.distribution_schedule_minute}:{args.distribution_schedule_second} {args.distribution_schedule_timezone}{days_str}"
+    #     logger.info(schedule_info)
+    # else:
+    #     frequency_info = (
+    #         f"Running queue_distribution every {args.distribution_frequency} seconds..."
+    #     )
+    #     logger.info(frequency_info)
 
     try:
         asyncio.run(main())
