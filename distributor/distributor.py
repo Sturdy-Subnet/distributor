@@ -29,6 +29,7 @@ from constants import (
     FREQUENCY_PERCENTAGE_SCORE,
     FREQUENCY_PERCENTAGE_DISTRIBUTION,
     MIN_SCORE_RECORDS,
+    TOKEN_IDS_FILE,
 )
 from addr import h160_to_ss58
 
@@ -762,6 +763,12 @@ async def record_scores_for_distribution(
                 ),
             )
             await db.commit()
+
+        # log the array of token ids in a json file
+        token_ids = list(normalized_scores.keys())
+        token_ids_file = os.path.join(os.path.dirname(db_path), TOKEN_IDS_FILE)
+        with open(token_ids_file, "w") as f:
+            json.dump(token_ids, f)
 
         logger.info(f"Successfully recorded scores for block {block_end}")
 

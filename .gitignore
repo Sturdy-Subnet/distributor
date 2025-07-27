@@ -17,3 +17,9 @@ logs/
 
 # env
 .env
+
+# macos
+.DS_Store
+
+# token ids
+token_ids.json

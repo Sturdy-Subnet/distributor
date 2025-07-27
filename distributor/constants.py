@@ -32,3 +32,4 @@ DEFAULT_LOG_LEVEL = "INFO"  # Default log level
 DEFAULT_LOG_ROTATION = "1 day"  # Default log rotation period
 DEFAULT_LOG_RETENTION = "30 days"  # Default log retention period
 DEFAULT_TIMEZONE = "UTC"  # Default timezone for scheduling
+TOKEN_IDS_FILE = "token_ids.json"  # Default file for storing token IDs
