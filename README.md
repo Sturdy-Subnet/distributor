@@ -21,8 +21,8 @@ This project consists of two main components:
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/opentensor/sturdy-lp-miner.git
-cd sturdy-lp-miner
+git clone https://github.com/opentensor/distributor.git
+cd distributor
 ```
 
 2. Install uv (if not already installed):
