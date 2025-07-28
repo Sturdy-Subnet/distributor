@@ -21,7 +21,7 @@ This project consists of two main components:
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/opentensor/distributor.git
+git clone https://github.com/Sturdy-Subnet/distributor.git
 cd distributor
 ```
 
