@@ -16,6 +16,8 @@ import dotenv
 from web3 import AsyncWeb3
 from args import add_args
 from constants import (
+    ALPHA_PER_EPOCH,
+    MINER_EMISSION_PCT,
     NETUID,
     SECONDS_PER_BT_BLOCK,
     MIN_REWARD_THRESHOLD,
@@ -30,6 +32,7 @@ from constants import (
     FREQUENCY_PERCENTAGE_DISTRIBUTION,
     MIN_SCORE_RECORDS,
     TOKEN_IDS_FILE,
+    BLOCKS_PER_EPOCH,
 )
 from addr import h160_to_ss58
 
@@ -668,6 +671,9 @@ async def record_scores_for_distribution(
     frequency_secs: int,
     blacklist_endpoint: str | None = None,
 ) -> None:
+    """
+    Record scores for distribution.
+    """
     try:
         block_end = await subtensor.get_current_block()
 
@@ -693,13 +699,22 @@ async def record_scores_for_distribution(
         block_start_stake = block_end - (frequency_secs // SECONDS_PER_BT_BLOCK)
 
         # calculate delta stake for the lp miner that will be distributing rewards
-        # TODO: set this to the correct
         meta_before = await subtensor.get_metagraph_info(
             netuid=NETUID, block=block_start
         )
         subnet_hotkeys = meta_before.hotkeys
         hotkey_uid = subnet_hotkeys.index(hotkey)
-        delta_stake = meta_before.emission[hotkey_uid].tao
+        incentive = meta_before.incentives[hotkey_uid]
+
+        # the number of epochs that have passed between block_start_stake and block_end
+        epochs_passed = (block_end - block_start_stake) // BLOCKS_PER_EPOCH
+
+        # log the calculation of delta stake
+        logger.debug(
+            f"Calculating delta stake: epochs_passed={epochs_passed}, incentive={incentive}, block_start_stake={block_start_stake}, block_end={block_end}"
+        )
+        # the amount stake increased in hotkey due to miner emissions
+        delta_stake = MINER_EMISSION_PCT * ALPHA_PER_EPOCH * epochs_passed * incentive
 
         # log the web3 provider URL
         if web3_provider is not None:

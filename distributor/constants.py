@@ -1,6 +1,7 @@
 # Constants for time calculations
 SECONDS_PER_HOUR = 3600  # 60 minutes * 60 seconds
 SECONDS_PER_BT_BLOCK = 12  # 12 seconds per block
+BLOCKS_PER_EPOCH = 360
 SECONDS_PER_DAY = 86400  # 24 hours * 60 minutes * 60 seconds
 SECONDS_PER_MINUTE = 60  # 60 seconds in a minute
 NETUID = 10  # netuid
@@ -9,6 +10,9 @@ MIN_REWARD_THRESHOLD = (
 )
 
 # New constants for distributor
+ALPHA_PER_EPOCH = 360  # 360 alpha gets emitted per epoch to the subnet
+MINER_EMISSION_PCT = 0.41  # 41% miners receive 41% of subnet emissions on SN10
+
 CHECK_INTERVAL_SECONDS = 300  # 5 minutes in seconds
 SCORE_CHECK_INTERVAL_SECONDS = 60  # Check blockchain state every minute
 PENDING_TRANSFER_WAIT_SECONDS = 300  # Check every 300 seconds when not in check window
