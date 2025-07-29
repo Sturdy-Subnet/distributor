@@ -624,6 +624,13 @@ async def get_fees(
         web3_provider=web3_provider, block_start=block_start, block_end=block_end
     )
 
+    # filter out the positions which have no position.total_fees_token1_equivalent
+    fees_in_range = {
+        token_id: position_info
+        for token_id, position_info in fees_in_range.items()
+        if position_info.total_fees_token1_equivalent > 0
+    }
+
     # get list of blacklisted token ids from the blacklist endpoint with a http client, and remove them from fees_in_range
     try:
         if blacklist_endpoint:
