@@ -6,7 +6,7 @@ A system for mining and distributing rewards to Liquidity Providers (LPs) in SN1
 
 This project consists of two main components:
 1. **LP Miner**: Sends LP positions to validators on SN10
-2. **Distributor**: Distributes rewards to LPs based on their fee generation performance
+2. **Distributor**: Distributes rewards the miner receives to LPs based on their fee generation performance
 
 ## Features
 
@@ -36,12 +36,37 @@ uv sync
 source .venv/bin/activate
 ```
 
-4. Set up environment variables in an `.env` file:
+4. Install and set up dbmate:
+See [here](https://github.com/amacneil/dbmate?tab=readme-ov-file#installation) for installation instructions.
+
+Once you have installed dbmate, run the following commands to set up the database:
 ```bash
-POSITION_CHAIN_PROVIDER_URL=<your-provider-url>
+dbmate --url "sqlite:database.db" create
+dbmate --url "sqlite:database.db" up
 ```
 
-## Configuration
+5. Set up environment variables in an `.env` file:
+```bash
+# environment variables for running the distributor
+POSITION_CHAIN_PROVIDER_URL=<your-provider-url>
+# the following may require a connection to sn10 validator
+BLACKLIST_ENDPOINT=<endpoint> # an endpoint which will send the token ids to blacklist from distribution
+API_KEY=<api-key> # api to the endpoint
+
+# environment variables for running the miner
+UNISWAP_POS_OWNER_KEY="" # can be kept blank if the miner is whitelisted
+BITTENSOR_MAINNET_PROVIDER_URL=<url>
+BITTENSOR_WEB3_PROVIDER_URL=<url>
+ETHEREUM_MAINNET_PROVIDER_URL=<url>
+```
+
+## Running the LP Miner
+```
+python distributor/miner.py --netuid NETUID --wallet.name COLDKEY-NAME --wallet.hotkey HOTKEY_NAME --validator.min_stake 40000 --subtensor.network NETWORK --wandb.off --logging.trace
+```
+For more information on running an LP miner, please consult the documentation [here](https://github.com/Sturdy-Subnet/sturdy-subnet/blob/main/docs/miner.md#starting-a-miner)
+
+## Running the Distributor
 
 The system can be configured using command-line arguments:
 
