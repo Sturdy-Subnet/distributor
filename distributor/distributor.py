@@ -19,6 +19,7 @@ from args import add_args
 from constants import (
     ALPHA_PER_EPOCH,
     MINER_EMISSION_PCT,
+    MINIMUM_TRANSFER_AMOUNT_TAO,
     NETUID,
     SECONDS_PER_BT_BLOCK,
     MIN_REWARD_THRESHOLD,
@@ -934,10 +935,10 @@ async def queue_distribution(
 
         # update the status of the token_id_scores in the database
         async with aiosqlite.connect(db_path) as db:
-            for token_id in ids_to_update:
+            for id in ids_to_update:
                 await db.execute(
                     "UPDATE token_id_scores SET used = 1 WHERE id = ?",
-                    (token_id,),
+                    (id,),
                 )
             await db.commit()
 
@@ -1227,10 +1228,16 @@ async def retry_failed_moves(
 
 
 async def run_pending_transfers(
-    db_path: str, wallet: bt.Wallet, distribution_subtensor: bt.AsyncSubtensor
+    db_path: str,
+    wallet: bt.Wallet,
+    distribution_subtensor: bt.AsyncSubtensor,
+    pos_chain_subtensor: bt.AsyncSubtensor,
 ):
     """Initiate transfers of rewards to LPs based on the queued transfers in the database."""
     try:
+        # First, merge any tiny transfers to optimize processing
+        await merge_tiny_transfers(db_path, wallet, pos_chain_subtensor)
+
         async with aiosqlite.connect(db_path) as db:
             # fetch all pending transfers from the database, and where origin_coldkey matches the wallet's coldkey
             # and also where the status is 'pending', and where the batch ids of the transfers match the batch id of successful moves from the moves table
@@ -1244,6 +1251,10 @@ async def run_pending_transfers(
                 (wallet.coldkeypub.ss58_address,),
             ) as cursor:
                 rows = await cursor.fetchall()
+
+        if not rows:
+            logger.info("No pending transfers found in the database.")
+            return
 
         async def process_single_transfer(row):
             (
@@ -1313,11 +1324,144 @@ async def run_pending_transfers(
         raise
 
 
+async def merge_tiny_transfers(
+    db_path: str, wallet: bt.Wallet, pos_chain_subtensor: bt.AsyncSubtensor
+):
+    """Merge tiny transfers (pending and failed) that have the same origin coldkey, destination coldkey, and origin hotkey."""
+    try:
+        # Get the current alpha token price (in TAO tokens per alpha)
+        alpha_price = (await pos_chain_subtensor.get_subnet_price(netuid=NETUID)).tao
+
+        logger.debug(
+            f"Alpha token price: {alpha_price} TAO tokens per alpha, minimum transfer value: {MINIMUM_TRANSFER_AMOUNT_TAO} TAO tokens"
+        )
+
+        async with aiosqlite.connect(db_path) as db:
+            # Get all transfers for this wallet that might be tiny
+            async with db.execute(
+                """
+                SELECT id, batch_id, origin_coldkey, destination_coldkey, destination_h160, origin_hotkey, amount
+                FROM transfers
+                WHERE (status = 'pending' OR status = 'failed') 
+                  AND origin_coldkey = ?
+                """,
+                (wallet.coldkeypub.ss58_address,),
+            ) as cursor:
+                all_transfers = await cursor.fetchall()
+
+            # Filter tiny transfers and group them
+            tiny_transfers = []
+            for transfer in all_transfers:
+                (
+                    transfer_id,
+                    batch_id,
+                    origin_coldkey,
+                    destination_coldkey,
+                    destination_h160,
+                    origin_hotkey,
+                    amount,
+                ) = transfer
+                # Convert alpha amount (in TAO units) to TAO token value
+                tao_token_value = amount * alpha_price
+                if tao_token_value < MINIMUM_TRANSFER_AMOUNT_TAO:
+                    tiny_transfers.append(transfer)
+
+            if not tiny_transfers:
+                logger.debug("No tiny transfers found to merge.")
+                return
+
+            # Group tiny transfers by (origin_coldkey, destination_coldkey, destination_h160, origin_hotkey)
+            transfer_groups = {}
+            for transfer in tiny_transfers:
+                (
+                    transfer_id,
+                    batch_id,
+                    origin_coldkey,
+                    destination_coldkey,
+                    destination_h160,
+                    origin_hotkey,
+                    amount,
+                ) = transfer
+                key = (
+                    origin_coldkey,
+                    destination_coldkey,
+                    destination_h160,
+                    origin_hotkey,
+                )
+                if key not in transfer_groups:
+                    transfer_groups[key] = []
+                transfer_groups[key].append(transfer)
+
+            # Merge groups with more than one transfer
+            for key, transfers in transfer_groups.items():
+                if len(transfers) <= 1:
+                    continue
+
+                origin_coldkey, destination_coldkey, destination_h160, origin_hotkey = (
+                    key
+                )
+                transfer_ids = [t[0] for t in transfers]
+                # Use the batch_id from the first transfer to maintain the connection with moves table
+                existing_batch_id = transfers[0][1]
+                total_amount = sum(t[6] for t in transfers)  # amount is now at index 6
+                count = len(transfers)
+
+                # Convert total amount to TAO token value for logging
+                total_tao_value = total_amount * alpha_price
+
+                logger.info(
+                    f"Merging {count} tiny transfers: {origin_coldkey} -> {destination_coldkey} "
+                    f"(H160: {destination_h160}), total amount: {total_amount} alpha (~{total_tao_value:.6f} TAO tokens)"
+                )
+
+                # Create a new merged transfer using existing batch_id to maintain moves table connection
+                async with db.execute(
+                    """
+                    INSERT INTO transfers (batch_id, status, origin_coldkey, destination_coldkey, destination_h160, origin_hotkey, amount)
+                    VALUES (?, 'pending', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        existing_batch_id,
+                        origin_coldkey,
+                        destination_coldkey,
+                        destination_h160,
+                        origin_hotkey,
+                        total_amount,
+                    ),
+                ) as cursor:
+                    new_transfer_id = cursor.lastrowid
+
+                # Delete the old tiny transfers
+                placeholders = ",".join(["?" for _ in transfer_ids])
+                await db.execute(
+                    f"DELETE FROM transfers WHERE id IN ({placeholders})",
+                    transfer_ids,
+                )
+
+                await db.commit()
+                logger.info(
+                    f"Successfully merged {count} tiny transfers into new transfer ID {new_transfer_id} "
+                    f"with total amount {total_amount} alpha (~{total_tao_value:.6f} TAO tokens) "
+                    f"using existing batch_id {existing_batch_id}"
+                )
+
+    except Exception as e:
+        logger.error("Error merging tiny transfers")
+        logger.exception(e)
+        raise
+
+
 async def retry_failed_transfers(
-    db_path: str, wallet: bt.Wallet, distribution_subtensor: bt.AsyncSubtensor
+    db_path: str,
+    wallet: bt.Wallet,
+    distribution_subtensor: bt.AsyncSubtensor,
+    pos_chain_subtensor: bt.AsyncSubtensor,
 ):
     """Retry failed transfers from the database."""
     try:
+        # First, merge any tiny transfers to optimize processing
+        await merge_tiny_transfers(db_path, wallet, pos_chain_subtensor)
+
         async with aiosqlite.connect(db_path) as db:
             async with db.execute(
                 """
@@ -1563,8 +1707,19 @@ if __name__ == "__main__":
                     "db_path": args.db_path,
                     "wallet": distribution_wallet,
                     "distribution_subtensor": distribution_subtensor,
+                    "pos_chain_subtensor": pos_chain_subtensor,
                 },
                 frequency_secs=args.pending_frequency,
+            ),
+            # Merge tiny transfers task (runs before retrying failed transfers)
+            run_on_schedule(
+                merge_tiny_transfers,
+                task_kwargs={
+                    "db_path": args.db_path,
+                    "wallet": distribution_wallet,
+                    "pos_chain_subtensor": pos_chain_subtensor,
+                },
+                frequency_secs=args.retry_frequency,
             ),
             # Retry failed transfers task
             run_on_schedule(
@@ -1573,6 +1728,7 @@ if __name__ == "__main__":
                     "db_path": args.db_path,
                     "wallet": distribution_wallet,
                     "distribution_subtensor": distribution_subtensor,
+                    "pos_chain_subtensor": pos_chain_subtensor,
                 },
                 frequency_secs=args.retry_frequency,
             ),

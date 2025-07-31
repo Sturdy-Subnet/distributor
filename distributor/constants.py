@@ -40,3 +40,6 @@ TOKEN_IDS_FILE = "token_ids.json"  # Default file for storing token IDs
 
 # Transaction processing constants
 TRANSACTION_DELAY_SECONDS = 2  # Delay between transactions to avoid rate limiting
+MINIMUM_TRANSFER_AMOUNT_TAO = (
+    0.0021  # minimum amount of alpha tokens to transfers priced in TAO
+)
