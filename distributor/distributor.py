@@ -3,6 +3,7 @@ import asyncio
 import dataclasses
 from datetime import datetime, timedelta
 import json
+import uuid
 import bittensor as bt
 from typing import Callable, Optional, List
 from sturdy.utils.taofi_subgraph import get_fees_in_range
@@ -33,6 +34,7 @@ from constants import (
     MIN_SCORE_RECORDS,
     TOKEN_IDS_FILE,
     BLOCKS_PER_EPOCH,
+    TRANSACTION_DELAY_SECONDS,
 )
 from addr import h160_to_ss58
 
@@ -802,7 +804,7 @@ async def record_scores_for_distribution(
 
 async def calculate_reward_distribution(
     db_path: str, start_block: int
-) -> tuple[dict[str, bt.Balance], list[int]]:
+) -> tuple[dict[str, bt.Balance], list[int], float]:
     """
     Calculate distribution information from the database.
     This is done by adding up the delta scores and the scores for the owners of the token ids
@@ -818,7 +820,7 @@ async def calculate_reward_distribution(
 
         if not rows:
             logger.warning("No records found in the database.")
-            return {}, []
+            return {}, [], 0.0
 
         ids = []
 
@@ -849,7 +851,7 @@ async def calculate_reward_distribution(
             logger.warning(
                 "Total ∆ stake has not increased, cannot calculate distribution."
             )
-            return {}, []
+            return {}, [], 0.0
 
         # owner -> reward
         reward_distribution: dict[str, bt.Balance] = {}
@@ -882,7 +884,7 @@ async def calculate_reward_distribution(
             sorted(reward_distribution.items(), key=lambda item: item[1], reverse=True)
         )
 
-        return reward_distribution, ids
+        return reward_distribution, ids, delta_stake
 
     except Exception as e:
         logger.error(f"Error calculating reward distribution: {e}")
@@ -924,9 +926,11 @@ async def queue_distribution(
         )
 
         # Calculate the reward distribution
-        reward_distribution, ids_to_update = await calculate_reward_distribution(
-            db_path, start_block
-        )
+        (
+            reward_distribution,
+            ids_to_update,
+            delta_stake,
+        ) = await calculate_reward_distribution(db_path, start_block)
 
         # update the status of the token_id_scores in the database
         async with aiosqlite.connect(db_path) as db:
@@ -941,54 +945,75 @@ async def queue_distribution(
             logger.info("No rewards to distribute, skipping distribution.")
             return
 
-        logger.info(
-            f"Calculated reward distribution for {len(reward_distribution)} LPs: {reward_distribution}"
-        )
+        batch_id = str(uuid.uuid4())
 
-        queued_distributions = 0
-        failed_distributions = 0
+        # Insert pending move entry into moves table
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO moves (batch_id, status, origin_coldkey, origin_hotkey, destination_hotkey, amount)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    batch_id,
+                    "pending",
+                    wallet.coldkeypub.ss58_address,
+                    origin_hotkey,
+                    destination_hotkey,
+                    delta_stake,
+                ),
+            )
 
-        for owner_h160, reward in reward_distribution.items():
-            if reward > 0:
-                try:
-                    # Convert H160 address to SS58 format for Bittensor transfer
-                    owner_ss58 = h160_to_ss58(owner_h160)
+            logger.info(
+                f"Calculated reward distribution for {len(reward_distribution)} LPs: {reward_distribution}"
+            )
 
-                    logger.info(
-                        f"Queuing distribution: {wallet.coldkeypub.ss58_address} --- {reward} ---> {owner_ss58} (H160: {owner_h160})"
-                    )
+            queued_distributions = 0
+            failed_distributions = 0
 
-                    # queue the transfer in the database
-                    async with aiosqlite.connect(db_path) as db:
+            for owner_h160, reward in reward_distribution.items():
+                if reward > 0:
+                    try:
+                        # Convert H160 address to SS58 format for Bittensor transfer
+                        owner_ss58 = h160_to_ss58(owner_h160)
+
+                        logger.info(
+                            f"Queuing distribution: {wallet.coldkeypub.ss58_address} --- {reward} ---> {owner_ss58} (H160: {owner_h160})"
+                        )
+
+                        # queue the transfer in the database
                         await db.execute(
                             """
-                            INSERT INTO transfers (status, origin_coldkey, destination_coldkey, destination_h160, origin_hotkey, destination_hotkey, amount)
+                            INSERT INTO transfers (batch_id, status, origin_coldkey, destination_coldkey, destination_h160, origin_hotkey, amount)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
+                                batch_id,
                                 "pending",
                                 wallet.coldkeypub.ss58_address,
                                 owner_ss58,
                                 owner_h160,
-                                origin_hotkey,
-                                origin_hotkey,  # TODO: for now we transfer to the same hotkey, but we'd may want to move stake to a different hotkey in the future
+                                destination_hotkey,  # since we moved the alpha to the destination hotkey, we use it here
                                 reward.tao,
                             ),
                         )
-                        await db.commit()
 
-                    queued_distributions += 1
+                        queued_distributions += 1
 
-                except ValueError as e:
-                    logger.error(f"Failed to convert address {owner_h160}: {e}")
-                    failed_distributions += 1
-                    continue
-                except Exception as e:
-                    logger.error(f"Failed to distribute reward to {owner_h160}: {e}")
-                    failed_distributions += 1
-                    continue
-            else:
-                logger.debug(f"Skipping zero reward for LP {owner_h160}")
+                    except ValueError as e:
+                        logger.error(f"Failed to convert address {owner_h160}: {e}")
+                        failed_distributions += 1
+                        continue
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to distribute reward to {owner_h160}: {e}"
+                        )
+                        failed_distributions += 1
+                        continue
+                else:
+                    logger.debug(f"Skipping zero reward for LP {owner_h160}")
+
+            await db.commit()
 
         # Log distribution summary
         total_attempts = queued_distributions + failed_distributions
@@ -1003,28 +1028,222 @@ async def queue_distribution(
         else:
             logger.info("No rewards to distribute, skipping queueing distribution.")
 
-        logger.warning("Reward distribution logic not yet fully implemented")
-
     except Exception as e:
         logger.error("Error queueing rewards distribution to LPs")
         logger.exception(e)
         raise
 
 
-async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
-    """Initiate transfers of rewards to LPs based on the queued transfers in the database."""
+async def run_pending_moves(
+    db_path: str, wallet: bt.Wallet, distribution_subtensor: bt.AsyncSubtensor
+):
+    """Moves alpha from origin hotkeys to destination hotkeys based on the queued moves in the database."""
     try:
         async with aiosqlite.connect(db_path) as db:
-            # Fetch all pending transfers from the database, and where origin_coldkey matches the wallet's coldkey
             async with db.execute(
-                "SELECT id, origin_coldkey, destination_coldkey, destination_h160, origin_hotkey, destination_hotkey, amount FROM transfers WHERE status = 'pending' AND origin_coldkey = ?",
-                (wallet.coldkeypub.ss58_address,),
+                "SELECT id, batch_id, origin_hotkey, destination_hotkey, amount FROM moves WHERE status = 'pending' AND origin_hotkey = ?",
+                (wallet.hotkey.ss58_address,),
             ) as cursor:
                 rows = await cursor.fetchall()
 
         if not rows:
-            logger.info("No pending transfers found in the database.")
+            logger.info("No pending moves found in the database.")
             return
+
+        async def process_single_move(row):
+            (
+                move_id,
+                batch_id,
+                origin_hotkey,
+                destination_hotkey,
+                amount_tao,
+            ) = row
+
+            if amount_tao <= 0:
+                logger.warning(
+                    f"Skipping move {move_id} with non-positive amount: {amount_tao}"
+                )
+                # update the move status to successful even if the amount is zero
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE moves SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (move_id,),
+                    )
+                    await db.commit()
+                return
+
+            try:
+                amount = bt.Balance.from_tao(amount_tao, netuid=NETUID)
+                logger.info(
+                    f"Moving: {origin_hotkey} --- {amount} ---> {destination_hotkey}"
+                )
+
+                move_success = await distribution_subtensor.move_stake(
+                    wallet=wallet,
+                    origin_hotkey=origin_hotkey,
+                    destination_hotkey=destination_hotkey,
+                    amount=amount,
+                    origin_netuid=NETUID,
+                    destination_netuid=NETUID,
+                )
+
+                if not move_success:
+                    # raise an exception if the move failed
+                    raise Exception(
+                        f"Move failed for {batch_id} {origin_hotkey} to {destination_hotkey}"
+                    )
+
+                logger.info(
+                    f"Successfully moved {batch_id}: {origin_hotkey} --- {amount} ---> {destination_hotkey}"
+                )
+
+                # Update the move status to completed
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE moves SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (move_id,),
+                    )
+                    await db.commit()
+
+            except Exception as e:
+                logger.error(f"Failed to complete move {move_id}: {e}")
+                # Update the move status to failed
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE moves SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (move_id,),
+                    )
+                    await db.commit()
+
+        # Process moves sequentially with delays to avoid rate limiting
+        for i, row in enumerate(rows):
+            if i > 0:  # Add delay between transactions (skip for first transaction)
+                logger.debug(
+                    f"Waiting {TRANSACTION_DELAY_SECONDS} seconds before next move..."
+                )
+                await asyncio.sleep(TRANSACTION_DELAY_SECONDS)
+            await process_single_move(row)
+    except Exception as e:
+        logger.error("Error running moves")
+        logger.exception(e)
+        raise
+
+
+async def retry_failed_moves(
+    db_path: str, wallet: bt.Wallet, distribution_subtensor: bt.AsyncSubtensor
+):
+    """Retry failed moves from the database."""
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute(
+                "SELECT id, batch_id, origin_hotkey, destination_hotkey, amount FROM moves WHERE status = 'failed' AND origin_hotkey = ?",
+                (wallet.hotkey.ss58_address,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        if not rows:
+            logger.info("No failed moves found in the database.")
+            return
+
+        async def retry_single_move(row):
+            (
+                move_id,
+                batch_id,
+                origin_hotkey,
+                destination_hotkey,
+                amount_tao,
+            ) = row
+
+            if amount_tao <= 0:
+                logger.warning(
+                    f"Skipping retry for move {move_id} with non-positive amount: {amount_tao}"
+                )
+                # update the move status to successful even if the amount is zero
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE moves SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (move_id,),
+                    )
+                    await db.commit()
+                return
+
+            try:
+                amount = bt.Balance.from_tao(amount_tao, netuid=NETUID)
+                logger.info(
+                    f"Retrying move: {origin_hotkey} --- {amount} ---> {destination_hotkey}"
+                )
+
+                move_success = await distribution_subtensor.move_stake(
+                    wallet=wallet,
+                    origin_hotkey=origin_hotkey,
+                    destination_hotkey=destination_hotkey,
+                    amount=amount,
+                    origin_netuid=NETUID,
+                    destination_netuid=NETUID,
+                )
+
+                if not move_success:
+                    # raise an exception if the move failed
+                    raise Exception(
+                        f"Retry move failed for {batch_id} {origin_hotkey} to {destination_hotkey}"
+                    )
+
+                logger.info(
+                    f"Successfully retried move: {origin_hotkey} --- {amount} ---> {destination_hotkey}"
+                )
+
+                # Update the move status to completed
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE moves SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (move_id,),
+                    )
+                    await db.commit()
+
+            except Exception as e:
+                logger.error(f"Failed to complete retry move {move_id}: {e}")
+                # Update the move status to failed
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        "UPDATE moves SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (move_id,),
+                    )
+                    await db.commit()
+
+                raise
+
+        # Process move retries sequentially with delays to avoid rate limiting
+        for i, row in enumerate(rows):
+            if i > 0:  # Add delay between transactions (skip for first transaction)
+                logger.debug(
+                    f"Waiting {TRANSACTION_DELAY_SECONDS} seconds before next move retry..."
+                )
+                await asyncio.sleep(TRANSACTION_DELAY_SECONDS)
+            await retry_single_move(row)
+    except Exception as e:
+        logger.error("Error retrying failed moves")
+        logger.exception(e)
+        raise
+
+
+async def run_pending_transfers(
+    db_path: str, wallet: bt.Wallet, distribution_subtensor: bt.AsyncSubtensor
+):
+    """Initiate transfers of rewards to LPs based on the queued transfers in the database."""
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            # fetch all pending transfers from the database, and where origin_coldkey matches the wallet's coldkey
+            # and also where the status is 'pending', and where the batch ids of the transfers match the batch id of successful moves from the moves table
+            async with db.execute(
+                """
+                SELECT transfers.id, transfers.origin_coldkey, transfers.destination_coldkey, transfers.destination_h160, transfers.origin_hotkey, transfers.amount
+                FROM transfers
+                JOIN moves ON transfers.batch_id = moves.batch_id
+                WHERE transfers.status = 'pending' AND transfers.origin_coldkey = ? AND moves.status = 'completed'
+                """,
+                (wallet.coldkeypub.ss58_address,),
+            ) as cursor:
+                rows = await cursor.fetchall()
 
         async def process_single_transfer(row):
             (
@@ -1033,43 +1252,13 @@ async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
                 destination_coldkey,
                 destination_h160,
                 origin_hotkey,
-                destination_hotkey,
                 amount_tao,
             ) = row
-            amount = bt.Balance.from_tao(amount_tao, netuid=NETUID)
             try:
-                # TODO: implement moving stake
-                # if the destination hotkey is different from the origin hotkey, then we should move stake before transferring alpha to the destination coldkey
-                # if destination_hotkey != origin_hotkey:
-                #     logger.info(
-                #         f"Moving stake from {origin_hotkey} to {destination_hotkey} before transfers"
-                #     )
-                #     await distribution_subtensor.transfer_stake(
-                #         wallet=wallet,
-                #         destination_coldkey_ss58=destination_coldkey,
-                #         hotkey_ss58=origin_hotkey,
-                #         amount=amount,
-                #         origin_netuid=NETUID,
-                #         destination_netuid=NETUID,
-                #     )
-                # Transfer the alpha to the destination coldkey
+                amount = bt.Balance.from_tao(amount_tao, netuid=NETUID)
                 logger.info(
                     f"Transferring: {origin_coldkey} --- {amount} ---> {destination_coldkey} (H160: {destination_h160})"
                 )
-                # move_success = await distribution_subtensor.move_stake(
-                #     wallet=wallet,
-                #     origin_hotkey=origin_hotkey,
-                #     destination_hotkey=destination_hotkey,
-                #     origin_netuid=NETUID,
-                #     destination_netuid=NETUID,
-                #     amount=amount,
-                # )
-
-                # if not move_success:
-                #     # raise an exception if the transfer failed
-                #     raise Exception(
-                #         f"Transfer failed for {origin_coldkey} to {destination_coldkey}"
-                #     )
 
                 # Transfer the stake to the destination coldkey
                 transfer_success = await distribution_subtensor.transfer_stake(
@@ -1086,6 +1275,7 @@ async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
                     raise Exception(
                         f"Transfer failed for {origin_coldkey} to {destination_coldkey}"
                     )
+
                 logger.info(
                     f"Successfully transferred: {origin_coldkey} --- {amount} ---> {destination_coldkey} (H160: {destination_h160})"
                 )
@@ -1093,7 +1283,7 @@ async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
                 # Update the transfer status to completed
                 async with aiosqlite.connect(db_path) as db:
                     await db.execute(
-                        "UPDATE transfers SET status = 'completed' WHERE id = ?",
+                        "UPDATE transfers SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (transfer_id,),
                     )
                     await db.commit()
@@ -1103,13 +1293,19 @@ async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
                 # Update the transfer status to failed
                 async with aiosqlite.connect(db_path) as db:
                     await db.execute(
-                        "UPDATE transfers SET status = 'failed' WHERE id = ?",
+                        "UPDATE transfers SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (transfer_id,),
                     )
                     await db.commit()
 
-        # Process all transfers concurrently
-        await asyncio.gather(*[process_single_transfer(row) for row in rows])
+        # Process transfers sequentially with delays to avoid rate limiting
+        for i, row in enumerate(rows):
+            if i > 0:  # Add delay between transactions (skip for first transaction)
+                logger.debug(
+                    f"Waiting {TRANSACTION_DELAY_SECONDS} seconds before next transfer..."
+                )
+                await asyncio.sleep(TRANSACTION_DELAY_SECONDS)
+            await process_single_transfer(row)
 
     except Exception as e:
         logger.error("Error running transfers")
@@ -1117,12 +1313,20 @@ async def run_pending_transfers(db_path: str, wallet: bt.Wallet):
         raise
 
 
-async def retry_failed_transfers(db_path: str, wallet: bt.Wallet):
+async def retry_failed_transfers(
+    db_path: str, wallet: bt.Wallet, distribution_subtensor: bt.AsyncSubtensor
+):
     """Retry failed transfers from the database."""
     try:
         async with aiosqlite.connect(db_path) as db:
             async with db.execute(
-                "SELECT id, origin_coldkey, destination_coldkey, destination_h160, origin_hotkey, destination_hotkey, amount FROM transfers WHERE status = 'failed'"
+                """
+                SELECT transfers.id, transfers.origin_coldkey, transfers.destination_coldkey, transfers.destination_h160, transfers.origin_hotkey, transfers.amount
+                FROM transfers
+                JOIN moves ON transfers.batch_id = moves.batch_id
+                WHERE transfers.status = 'failed' AND transfers.origin_coldkey = ? AND moves.status = 'completed'
+                """,
+                (wallet.coldkeypub.ss58_address,),
             ) as cursor:
                 rows = await cursor.fetchall()
 
@@ -1137,19 +1341,14 @@ async def retry_failed_transfers(db_path: str, wallet: bt.Wallet):
                 destination_coldkey,
                 destination_h160,
                 origin_hotkey,
-                destination_hotkey,
                 amount,
             ) = row
             try:
-                # Here we would implement the actual retry logic
-                # For now, we just log the action
                 amount_alpha = bt.Balance.from_tao(amount, netuid=NETUID)
                 logger.info(
                     f"Retrying transfer: {origin_coldkey} --- {amount_alpha} ---> {destination_coldkey} (H160: {destination_h160})"
                 )
 
-                # TODO: Here we would implement the actual transfer logic
-                # For now, we just log the action with the converted address
                 transfer_success = await distribution_subtensor.transfer_stake(
                     wallet=wallet,
                     destination_coldkey_ss58=destination_coldkey,
@@ -1172,7 +1371,7 @@ async def retry_failed_transfers(db_path: str, wallet: bt.Wallet):
                 # Update the transfer status to completed
                 async with aiosqlite.connect(db_path) as db:
                     await db.execute(
-                        "UPDATE transfers SET status = 'completed' WHERE id = ?",
+                        "UPDATE transfers SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (transfer_id,),
                     )
                     await db.commit()
@@ -1182,13 +1381,19 @@ async def retry_failed_transfers(db_path: str, wallet: bt.Wallet):
                 # Update the transfer status to failed again
                 async with aiosqlite.connect(db_path) as db:
                     await db.execute(
-                        "UPDATE transfers SET status = 'failed' WHERE id = ?",
+                        "UPDATE transfers SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (transfer_id,),
                     )
                     await db.commit()
 
-        # Process all transfers concurrently
-        await asyncio.gather(*[retry_single_transfer(row) for row in rows])
+        # Process transfer retries sequentially with delays to avoid rate limiting
+        for i, row in enumerate(rows):
+            if i > 0:  # Add delay between transactions (skip for first transaction)
+                logger.debug(
+                    f"Waiting {TRANSACTION_DELAY_SECONDS} seconds before next transfer retry..."
+                )
+                await asyncio.sleep(TRANSACTION_DELAY_SECONDS)
+            await retry_single_transfer(row)
 
     except Exception as e:
         logger.error("Error retrying failed distributions")
@@ -1331,16 +1536,44 @@ if __name__ == "__main__":
                 second=args.distribution_schedule_second,
                 days=distribution_days,
             ),
+            # Run pending moves task
+            run_on_schedule(
+                run_pending_moves,
+                task_kwargs={
+                    "db_path": args.db_path,
+                    "wallet": distribution_wallet,
+                    "distribution_subtensor": distribution_subtensor,
+                },
+                frequency_secs=args.pending_frequency,
+            ),
+            # Retry failed moves task
+            run_on_schedule(
+                retry_failed_moves,
+                task_kwargs={
+                    "db_path": args.db_path,
+                    "wallet": distribution_wallet,
+                    "distribution_subtensor": distribution_subtensor,
+                },
+                frequency_secs=args.retry_frequency,
+            ),
             # Run pending transfers task
             run_on_schedule(
                 run_pending_transfers,
-                task_kwargs={"db_path": args.db_path, "wallet": distribution_wallet},
+                task_kwargs={
+                    "db_path": args.db_path,
+                    "wallet": distribution_wallet,
+                    "distribution_subtensor": distribution_subtensor,
+                },
                 frequency_secs=args.pending_frequency,
             ),
             # Retry failed transfers task
             run_on_schedule(
                 retry_failed_transfers,
-                task_kwargs={"db_path": args.db_path, "wallet": distribution_wallet},
+                task_kwargs={
+                    "db_path": args.db_path,
+                    "wallet": distribution_wallet,
+                    "distribution_subtensor": distribution_subtensor,
+                },
                 frequency_secs=args.retry_frequency,
             ),
         ]
