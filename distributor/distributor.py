@@ -710,7 +710,7 @@ async def record_scores_for_distribution(
 
         # calculate delta stake for the lp miner that will be distributing rewards
         meta_before = await subtensor.get_metagraph_info(
-            netuid=NETUID, block=block_start
+            netuid=NETUID, block=block_start_stake
         )
         subnet_hotkeys = meta_before.hotkeys
         hotkey_uid = subnet_hotkeys.index(hotkey)
