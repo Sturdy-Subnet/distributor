@@ -1263,20 +1263,19 @@ async def run_pending_transfers(
                 destination_coldkey,
                 destination_h160,
                 origin_hotkey,
-                amount_tao,
+                amount,
             ) = row
             try:
-                amount = bt.Balance.from_tao(amount_tao, netuid=NETUID)
+                amount_alpha = bt.Balance.from_tao(amount, netuid=NETUID)
                 logger.info(
-                    f"Transferring: {origin_coldkey} --- {amount} ---> {destination_coldkey} (H160: {destination_h160})"
+                    f"Transferring: {origin_coldkey} --- {amount_alpha} ---> {destination_coldkey} (H160: {destination_h160})"
                 )
 
-                # Transfer the stake to the destination coldkey
                 transfer_success = await distribution_subtensor.transfer_stake(
                     wallet=wallet,
-                    destination_coldkey_ss58=origin_coldkey,
+                    destination_coldkey_ss58=destination_coldkey,
                     hotkey_ss58=origin_hotkey,
-                    amount=amount,
+                    amount=amount_alpha,
                     origin_netuid=NETUID,
                     destination_netuid=NETUID,
                 )
