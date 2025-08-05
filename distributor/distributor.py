@@ -7,12 +7,12 @@ import uuid
 import bittensor as bt
 from typing import Callable, Optional, List
 from sturdy.utils.taofi_subgraph import get_fees_in_range
+from sturdy.utils.association import get_associated_evm_keys
 import aiosqlite
 from zoneinfo import ZoneInfo
 from loguru import logger
 import sys
 import os
-import httpx
 import dotenv
 from web3 import AsyncWeb3
 from args import add_args
@@ -618,9 +618,9 @@ def calculate_lookback_seconds(
 
 async def get_fees(
     web3_provider: AsyncWeb3,
+    subtensor: bt.AsyncSubtensor,
     block_start: int,
     block_end: int,
-    blacklist_endpoint: str | None = None,
 ) -> dict:
     # Get the fee growth for each LP position
     fees_in_range, _ = await get_fees_in_range(
@@ -634,41 +634,40 @@ async def get_fees(
         if position_info.total_fees_token1_equivalent > 0
     }
 
+    # Get associated evm keys
+    hotkeys = (await subtensor.metagraph(netuid=NETUID)).hotkeys
+    uids = list(range(len(hotkeys)))
+    associated_evm_keys = await get_associated_evm_keys(
+        netuid=NETUID, uids=uids, subtensor=subtensor
+    )
+    # loewrcase the addresses for consistency
+    associated_evm_keys = {
+        uid: evm_key.lower() if evm_key is not None else None
+        for uid, evm_key in associated_evm_keys.items()
+    }
+    logger.debug(f"Associated EVM keys: {associated_evm_keys}")
+
+    # Generate mapping from owners to token ids
+    owners_to_token_ids = {}
+    for token_id, position_info in fees_in_range.items():
+        # NOTE: we don't checksum the address here because associated_evm_keys and owners_to_token_ids have lowercased addresses
+        owner = position_info.owner
+        owners_to_token_ids.setdefault(owner, []).append(token_id)
+
+    logger.debug(f"Owners to token ids mapping: {owners_to_token_ids}")
+
     # get list of blacklisted token ids from the blacklist endpoint with a http client, and remove them from fees_in_range
-    try:
-        if blacklist_endpoint:
-            async with httpx.AsyncClient() as client:
-                headers = {}
-                if api_key := os.getenv("API_KEY"):
-                    headers["Authorization"] = f"Bearer {api_key}"
-                try:
-                    response = await client.get(blacklist_endpoint, headers=headers)
-                    response.raise_for_status()
-                    blacklist = response.json().get("claimed_token_ids", [])
-                    blacklist_set = set(blacklist)
-                except httpx.RequestError as e:
-                    logger.error(f"Error fetching blacklist: {e}")
-                    blacklist_set = set()
-        else:
-            blacklist_set = set()
+    # this can be done by scanning through the owners_to_token_ids mapping with the associated evm keys
+    blacklisted_token_ids = set()
 
-        # log blacklist information
-        if blacklist_set:
-            logger.info(
-                f"Using blacklist from {blacklist_endpoint} with {len(blacklist_set)} entries"
+    for miner_uid, owner in associated_evm_keys.items():
+        if owner in owners_to_token_ids:
+            logger.debug(
+                f"Blacklisting token ids for miner {miner_uid} (owner: {owner}): {owners_to_token_ids[owner]}"
             )
-            logger.debug(f"Blacklist entries: {blacklist_set}")
+            blacklisted_token_ids.update(owners_to_token_ids[owner])
 
-        # Return fees_in_range filtered by blacklist
-        return {
-            token_id: fees
-            for token_id, fees in fees_in_range.items()
-            if token_id not in blacklist_set
-        }
-    except Exception as e:
-        logger.error("Error obtaining blacklist:")
-        logger.exception(e)
-        return fees_in_range  # Return unfiltered fees if blacklist fetch fails
+    return {k: v for k, v in fees_in_range.items() if k not in blacklisted_token_ids}
 
 
 async def record_scores_for_distribution(
@@ -679,7 +678,6 @@ async def record_scores_for_distribution(
     web3_provider: AsyncWeb3,
     fee_check_period: int,
     frequency_secs: int,
-    blacklist_endpoint: str | None = None,
 ) -> None:
     """
     Record scores for distribution.
@@ -736,9 +734,9 @@ async def record_scores_for_distribution(
         # Get the fee growth for each LP position
         fees_in_range = await get_fees(
             web3_provider=web3_provider,
+            subtensor=subtensor,
             block_start=block_start,
             block_end=block_end,
-            blacklist_endpoint=blacklist_endpoint,
         )
 
         logger.debug(f"Calculated fee growth for {len(fees_in_range)} positions")
@@ -1656,7 +1654,6 @@ if __name__ == "__main__":
                     "web3_provider": w3,
                     "fee_check_period": args.fee_check_period,
                     "frequency_secs": args.record_scores_frequency,
-                    "blacklist_endpoint": os.getenv("BLACKLIST_ENDPOINT"),
                 },
                 frequency_secs=args.record_scores_frequency,
             ),

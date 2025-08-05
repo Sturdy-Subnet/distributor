@@ -50,8 +50,6 @@ dbmate --url "sqlite:database.db" up
 # environment variables for running the distributor
 POSITION_CHAIN_PROVIDER_URL=<your-provider-url>
 # the following may require a connection to sn10 validator
-BLACKLIST_ENDPOINT=<endpoint> # an endpoint which will send the token ids to blacklist from distribution
-API_KEY=<api-key> # api to the endpoint
 
 # environment variables for running the miner
 UNISWAP_POS_OWNER_KEY="" # can be kept blank if the miner is whitelisted

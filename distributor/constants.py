@@ -11,7 +11,7 @@ MIN_REWARD_THRESHOLD = (
 
 # New constants for distributor
 ALPHA_PER_EPOCH = 360  # 360 alpha gets emitted per epoch to the subnet
-MINER_EMISSION_PCT = 0.41  # 41% miners receive 41% of subnet emissions on SN10
+MINER_EMISSION_PCT = 0.41  # 41% of subnet emissions on SN10 are for miners
 
 CHECK_INTERVAL_SECONDS = 300  # 5 minutes in seconds
 SCORE_CHECK_INTERVAL_SECONDS = 60  # Check blockchain state every minute
