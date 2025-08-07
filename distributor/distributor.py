@@ -1234,7 +1234,10 @@ async def run_pending_transfers(
     """Initiate transfers of rewards to LPs based on the queued transfers in the database."""
     try:
         # First, merge any tiny transfers to optimize processing
-        await merge_tiny_transfers(db_path, wallet, pos_chain_subtensor)
+        try:
+            await merge_tiny_transfers(db_path, wallet, pos_chain_subtensor)
+        except Exception as e:
+            logger.error(f"Error merging tiny transfers: {e}")
 
         async with aiosqlite.connect(db_path) as db:
             # fetch all pending transfers from the database, and where origin_coldkey matches the wallet's coldkey
@@ -1457,7 +1460,10 @@ async def retry_failed_transfers(
     """Retry failed transfers from the database."""
     try:
         # First, merge any tiny transfers to optimize processing
-        await merge_tiny_transfers(db_path, wallet, pos_chain_subtensor)
+        try:
+            await merge_tiny_transfers(db_path, wallet, pos_chain_subtensor)
+        except Exception as e:
+            logger.error(f"Error merging tiny transfers: {e}")
 
         async with aiosqlite.connect(db_path) as db:
             async with db.execute(
