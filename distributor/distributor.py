@@ -798,7 +798,6 @@ async def record_scores_for_distribution(
     except Exception as e:
         logger.error("Error recording scores for distribution:")
         logger.exception(e)
-        raise
 
 
 async def calculate_reward_distribution(
@@ -1030,7 +1029,6 @@ async def queue_distribution(
     except Exception as e:
         logger.error("Error queueing rewards distribution to LPs")
         logger.exception(e)
-        raise
 
 
 async def run_pending_moves(
@@ -1125,7 +1123,6 @@ async def run_pending_moves(
     except Exception as e:
         logger.error("Error running moves")
         logger.exception(e)
-        raise
 
 
 async def retry_failed_moves(
@@ -1209,8 +1206,6 @@ async def retry_failed_moves(
                     )
                     await db.commit()
 
-                raise
-
         # Process move retries sequentially with delays to avoid rate limiting
         for i, row in enumerate(rows):
             if i > 0:  # Add delay between transactions (skip for first transaction)
@@ -1222,7 +1217,6 @@ async def retry_failed_moves(
     except Exception as e:
         logger.error("Error retrying failed moves")
         logger.exception(e)
-        raise
 
 
 async def run_pending_transfers(
@@ -1321,7 +1315,6 @@ async def run_pending_transfers(
     except Exception as e:
         logger.error("Error running transfers")
         logger.exception(e)
-        raise
 
 
 async def merge_tiny_transfers(
@@ -1448,7 +1441,6 @@ async def merge_tiny_transfers(
     except Exception as e:
         logger.error("Error merging tiny transfers")
         logger.exception(e)
-        raise
 
 
 async def retry_failed_transfers(
@@ -1545,7 +1537,6 @@ async def retry_failed_transfers(
     except Exception as e:
         logger.error("Error retrying failed distributions")
         logger.exception(e)
-        raise
 
 
 if __name__ == "__main__":
