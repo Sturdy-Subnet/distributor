@@ -1227,6 +1227,12 @@ async def run_pending_transfers(
 ):
     """Initiate transfers of rewards to LPs based on the queued transfers in the database."""
     try:
+        # Get the current alpha token price (in TAO tokens per alpha)
+        alpha_price = (await pos_chain_subtensor.get_subnet_price(netuid=NETUID)).tao
+        logger.debug(
+            f"Alpha token price: {alpha_price} TAO tokens per alpha, minimum transfer value: {MINIMUM_TRANSFER_AMOUNT_TAO} TAO tokens"
+        )
+
         # First, merge any tiny transfers to optimize processing
         try:
             await merge_tiny_transfers(db_path, wallet, pos_chain_subtensor)
@@ -1260,6 +1266,16 @@ async def run_pending_transfers(
                 origin_hotkey,
                 amount,
             ) = row
+
+            # Check if transfer amount is below minimum threshold
+            tao_token_value = amount * alpha_price
+            if tao_token_value < MINIMUM_TRANSFER_AMOUNT_TAO:
+                logger.debug(
+                    f"Skipping transfer {transfer_id} - amount {amount} alpha (${tao_token_value:.6f} TAO) is below minimum threshold of ${MINIMUM_TRANSFER_AMOUNT_TAO} TAO"
+                )
+                # Skip without changing status - can be merged with other transfers later
+                return
+
             try:
                 amount_alpha = bt.Balance.from_tao(amount, netuid=NETUID)
                 logger.info(
@@ -1451,6 +1467,12 @@ async def retry_failed_transfers(
 ):
     """Retry failed transfers from the database."""
     try:
+        # Get the current alpha token price (in TAO tokens per alpha)
+        alpha_price = (await pos_chain_subtensor.get_subnet_price(netuid=NETUID)).tao
+        logger.debug(
+            f"Alpha token price: {alpha_price} TAO tokens per alpha, minimum transfer value: {MINIMUM_TRANSFER_AMOUNT_TAO} TAO tokens"
+        )
+
         # First, merge any tiny transfers to optimize processing
         try:
             await merge_tiny_transfers(db_path, wallet, pos_chain_subtensor)
@@ -1482,6 +1504,16 @@ async def retry_failed_transfers(
                 origin_hotkey,
                 amount,
             ) = row
+
+            # Check if transfer amount is below minimum threshold
+            tao_token_value = amount * alpha_price
+            if tao_token_value < MINIMUM_TRANSFER_AMOUNT_TAO:
+                logger.debug(
+                    f"Skipping failed transfer retry {transfer_id} - amount {amount} alpha (${tao_token_value:.6f} TAO) is below minimum threshold of ${MINIMUM_TRANSFER_AMOUNT_TAO} TAO"
+                )
+                # Skip without changing status - can be merged with other transfers later
+                return
+
             try:
                 amount_alpha = bt.Balance.from_tao(amount, netuid=NETUID)
                 logger.info(

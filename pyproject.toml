@@ -9,7 +9,6 @@ dependencies = [
     "argparse>=1.4.0",
     "dotenv>=0.9.9",
     "loguru>=0.7.0",
-    "matplotlib>=3.10.3",
     "ruff>=0.12.4",
     "sturdy-subnet",
 ]
