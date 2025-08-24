@@ -882,7 +882,7 @@ async def calculate_reward_distribution(
             sorted(reward_distribution.items(), key=lambda item: item[1], reverse=True)
         )
 
-        return reward_distribution, ids, delta_stake
+        return reward_distribution, ids, total_delta_stake
 
     except Exception as e:
         logger.error(f"Error calculating reward distribution: {e}")
