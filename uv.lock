@@ -432,7 +432,7 @@ requires-dist = [
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "ruff", specifier = ">=0.12.4" },
-    { name = "sturdy-subnet", git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=f3ec10831bfd7d5cd6bf22b04614f2f998aa43b0" },
+    { name = "sturdy-subnet", git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=6.0.4" },
 ]
 
 [[package]]
@@ -1457,7 +1457,7 @@ wheels = [
 [[package]]
 name = "sturdy-subnet"
 version = "6.0.4"
-source = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=f3ec10831bfd7d5cd6bf22b04614f2f998aa43b0#f3ec10831bfd7d5cd6bf22b04614f2f998aa43b0" }
+source = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=6.0.4#ec53b00892110249455e40170656e30677a38239" }
 dependencies = [
     { name = "annotated-types" },
     { name = "anyio" },
