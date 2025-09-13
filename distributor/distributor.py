@@ -1067,7 +1067,7 @@ async def run_pending_moves(
                         (move_id,),
                     )
                     await db.commit()
-                return
+                return False  # Return False to indicate move was skipped
 
             try:
                 amount = bt.Balance.from_tao(amount_tao, netuid=NETUID)
@@ -1102,6 +1102,8 @@ async def run_pending_moves(
                     )
                     await db.commit()
 
+                return True  # Return True to indicate move was executed
+
             except Exception as e:
                 logger.error(f"Failed to complete move {move_id}: {e}")
                 # Update the move status to failed
@@ -1112,14 +1114,19 @@ async def run_pending_moves(
                     )
                     await db.commit()
 
+                return True  # Return True because we attempted the move (even though it failed)
+
         # Process moves sequentially with delays to avoid rate limiting
+        last_move_executed = False
         for i, row in enumerate(rows):
-            if i > 0:  # Add delay between transactions (skip for first transaction)
+            # Add delay only if the previous move was actually executed
+            if i > 0 and last_move_executed:
                 logger.debug(
                     f"Waiting {TRANSACTION_DELAY_SECONDS} seconds before next move..."
                 )
                 await asyncio.sleep(TRANSACTION_DELAY_SECONDS)
-            await process_single_move(row)
+
+            last_move_executed = await process_single_move(row)
     except Exception as e:
         logger.error("Error running moves")
         logger.exception(e)
@@ -1161,7 +1168,7 @@ async def retry_failed_moves(
                         (move_id,),
                     )
                     await db.commit()
-                return
+                return False  # Return False to indicate move was skipped
 
             try:
                 amount = bt.Balance.from_tao(amount_tao, netuid=NETUID)
@@ -1196,6 +1203,8 @@ async def retry_failed_moves(
                     )
                     await db.commit()
 
+                return True  # Return True to indicate move was executed
+
             except Exception as e:
                 logger.error(f"Failed to complete retry move {move_id}: {e}")
                 # Update the move status to failed
@@ -1206,14 +1215,19 @@ async def retry_failed_moves(
                     )
                     await db.commit()
 
+                return True  # Return True because we attempted the move (even though it failed)
+
         # Process move retries sequentially with delays to avoid rate limiting
+        last_move_retry_executed = False
         for i, row in enumerate(rows):
-            if i > 0:  # Add delay between transactions (skip for first transaction)
+            # Add delay only if the previous move retry was actually executed
+            if i > 0 and last_move_retry_executed:
                 logger.debug(
                     f"Waiting {TRANSACTION_DELAY_SECONDS} seconds before next move retry..."
                 )
                 await asyncio.sleep(TRANSACTION_DELAY_SECONDS)
-            await retry_single_move(row)
+
+            last_move_retry_executed = await retry_single_move(row)
     except Exception as e:
         logger.error("Error retrying failed moves")
         logger.exception(e)
@@ -1274,7 +1288,7 @@ async def run_pending_transfers(
                     f"Skipping transfer {transfer_id} - amount {amount} alpha (${tao_token_value:.6f} TAO) is below minimum threshold of ${MINIMUM_TRANSFER_AMOUNT_TAO} TAO"
                 )
                 # Skip without changing status - can be merged with other transfers later
-                return
+                return False  # Return False to indicate transfer was skipped
 
             try:
                 amount_alpha = bt.Balance.from_tao(amount, netuid=NETUID)
@@ -1309,6 +1323,8 @@ async def run_pending_transfers(
                     )
                     await db.commit()
 
+                return True  # Return True to indicate transfer was executed
+
             except Exception as e:
                 logger.error(f"Failed to complete transfer {transfer_id}: {e}")
                 # Update the transfer status to failed
@@ -1319,14 +1335,19 @@ async def run_pending_transfers(
                     )
                     await db.commit()
 
+                return True  # Return True because we attempted the transfer (even though it failed)
+
         # Process transfers sequentially with delays to avoid rate limiting
+        last_transfer_executed = False
         for i, row in enumerate(rows):
-            if i > 0:  # Add delay between transactions (skip for first transaction)
+            # Add delay only if the previous transfer was actually executed
+            if i > 0 and last_transfer_executed:
                 logger.debug(
                     f"Waiting {TRANSACTION_DELAY_SECONDS} seconds before next transfer..."
                 )
                 await asyncio.sleep(TRANSACTION_DELAY_SECONDS)
-            await process_single_transfer(row)
+
+            last_transfer_executed = await process_single_transfer(row)
 
     except Exception as e:
         logger.error("Error running transfers")
@@ -1512,7 +1533,7 @@ async def retry_failed_transfers(
                     f"Skipping failed transfer retry {transfer_id} - amount {amount} alpha (${tao_token_value:.6f} TAO) is below minimum threshold of ${MINIMUM_TRANSFER_AMOUNT_TAO} TAO"
                 )
                 # Skip without changing status - can be merged with other transfers later
-                return
+                return False  # Return False to indicate transfer was skipped
 
             try:
                 amount_alpha = bt.Balance.from_tao(amount, netuid=NETUID)
@@ -1547,6 +1568,8 @@ async def retry_failed_transfers(
                     )
                     await db.commit()
 
+                return True  # Return True to indicate transfer was executed
+
             except Exception as e:
                 logger.error(f"Failed to retry transfer {transfer_id}: {e}")
                 # Update the transfer status to failed again
@@ -1557,14 +1580,19 @@ async def retry_failed_transfers(
                     )
                     await db.commit()
 
+                return True  # Return True because we attempted the transfer (even though it failed)
+
         # Process transfer retries sequentially with delays to avoid rate limiting
+        last_retry_executed = False
         for i, row in enumerate(rows):
-            if i > 0:  # Add delay between transactions (skip for first transaction)
+            # Add delay only if the previous retry was actually executed
+            if i > 0 and last_retry_executed:
                 logger.debug(
                     f"Waiting {TRANSACTION_DELAY_SECONDS} seconds before next transfer retry..."
                 )
                 await asyncio.sleep(TRANSACTION_DELAY_SECONDS)
-            await retry_single_transfer(row)
+
+            last_retry_executed = await retry_single_transfer(row)
 
     except Exception as e:
         logger.error("Error retrying failed distributions")
