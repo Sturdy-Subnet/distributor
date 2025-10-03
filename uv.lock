@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = "==3.11.*"
 resolution-markers = [
     "sys_platform == 'linux'",
@@ -422,7 +422,7 @@ dependencies = [
     { name = "dotenv" },
     { name = "loguru" },
     { name = "ruff" },
-    { name = "sturdy-subnet" },
+    { name = "swap-subnet" },
 ]
 
 [package.metadata]
@@ -432,7 +432,7 @@ requires-dist = [
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "ruff", specifier = ">=0.12.4" },
-    { name = "sturdy-subnet", git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=6.0.6" },
+    { name = "swap-subnet", git = "https://github.com/Swap-Subnet/swap-subnet?rev=7.0.1" },
 ]
 
 [[package]]
@@ -1455,9 +1455,9 @@ wheels = [
 ]
 
 [[package]]
-name = "sturdy-subnet"
-version = "6.0.6"
-source = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet?rev=6.0.6#1724743abca467f8e0347218a50797b9ab8b9511" }
+name = "swap-subnet"
+version = "7.0.1"
+source = { git = "https://github.com/Swap-Subnet/swap-subnet?rev=7.0.1#889648a3c31caf76cc13c49a70540efbde75c1fc" }
 dependencies = [
     { name = "annotated-types" },
     { name = "anyio" },

@@ -21,7 +21,7 @@ This project consists of two main components:
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/Sturdy-Subnet/distributor.git
+git clone https://github.com/Swap-Subnet/distributor.git
 cd distributor
 ```
 
@@ -51,18 +51,10 @@ dbmate --url "sqlite:database.db" up
 POSITION_CHAIN_PROVIDER_URL=<your-provider-url>
 # the following may require a connection to sn10 validator
 
-# environment variables for running the miner
-UNISWAP_POS_OWNER_KEY="" # can be kept blank if the miner is whitelisted
 BITTENSOR_MAINNET_PROVIDER_URL=<url>
 BITTENSOR_WEB3_PROVIDER_URL=<url>
 ETHEREUM_MAINNET_PROVIDER_URL=<url>
 ```
-
-## Running the LP Miner
-```
-python distributor/miner.py --netuid NETUID --wallet.name COLDKEY-NAME --wallet.hotkey HOTKEY_NAME --validator.min_stake 40000 --subtensor.network NETWORK --wandb.off --logging.trace
-```
-For more information on running an LP miner, please consult the documentation [here](https://github.com/Sturdy-Subnet/sturdy-subnet/blob/main/docs/miner.md#starting-a-miner)
 
 ## Running the Distributor
 

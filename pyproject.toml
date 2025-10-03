@@ -1,6 +1,6 @@
 [project]
 name = "distributor"
-version = "0.1.9"
+version = "0.1.10"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
@@ -10,8 +10,8 @@ dependencies = [
     "dotenv>=0.9.9",
     "loguru>=0.7.0",
     "ruff>=0.12.4",
-    "sturdy-subnet",
+    "swap-subnet",
 ]
 
 [tool.uv.sources]
-sturdy-subnet = { git = "https://github.com/Sturdy-Subnet/sturdy-subnet", rev = "6.0.6" }
+swap-subnet = { git = "https://github.com/Swap-Subnet/swap-subnet", rev = "7.0.1" }
