@@ -6,8 +6,8 @@ import json
 import uuid
 import bittensor as bt
 from typing import Callable, Optional, List
-from sturdy.utils.taofi_subgraph import get_fees_in_range
-from sturdy.utils.association import get_associated_evm_keys
+from swap.utils.taofi_subgraph import get_fees_in_range
+from swap.utils.association import get_associated_evm_keys
 import aiosqlite
 from zoneinfo import ZoneInfo
 from loguru import logger
